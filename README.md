@@ -20,6 +20,19 @@ systems (window management, UI, rendering) and engine integration layers are out
 
 ---
 
+## Domain Reference
+
+The full data model is split across four domain documents:
+
+| Domain | File | Contents |
+|---|---|---|
+| **Tile / World** | [TILE_WORLD.md](TILE_WORLD.md) | Tile definitions, zones, world map parameters, player state, pathfinding & movement (§1, §2, §7, §12) |
+| **Entities / Workers** | [ENTITIES_WORKERS.md](ENTITIES_WORKERS.md) | Entity interfaces, unit type definitions, unit actors, attributes & modifiers (§0, §6, §9, §13) |
+| **Resources** | [RESOURCES.md](RESOURCES.md) | Resource definitions, equipment, world objects (§3, §14, §16) |
+| **Buildings / Jobs** | [BUILDINGS_JOBS.md](BUILDINGS_JOBS.md) | Building definitions, work tasks & steps, building actors, game events, connections, technologies (§4, §5, §8, §10, §11, §15) |
+
+---
+
 ## Terminology & Platform Conventions
 
 Bastion uses Unreal Engine 5 terminology as its baseline naming convention. Where the
