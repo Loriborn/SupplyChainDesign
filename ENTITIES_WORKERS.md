@@ -12,9 +12,8 @@ entity type implements only the interfaces relevant to its role. This avoids for
 capabilities onto entities that don't need them — a dropped resource world object has no
 need for equipment slots; a cosmetic building prop may not need a modifier stack.
 
-The interfaces are structural contracts, not class hierarchies. In UE they are implemented
-as pure virtual `UInterface` types. In the editor and Python demo they are duck-typed
-struct conventions.
+The interfaces are structural contracts, not class hierarchies. Implemented as pure virtual
+`UInterface` types in C++.
 
 ---
 
@@ -126,19 +125,19 @@ Workers and combat units are the same type. Role is expressed entirely through f
 
 | Field | Type | Description |
 |---|---|---|
-| `id` | `string` | Unique identifier |
-| `name` | `string` | Display name |
-| `icon` | `asset ref` | Visual representation |
-| `tags` | `string[]` | Classification labels (e.g. `"military"`, `"civilian"`, `"mounted"`) |
+| `id` | `FName` | Unique identifier |
+| `name` | `FString` | Display name |
+| `icon` | `TSoftObjectPtr<UTexture2D>` | Visual representation |
+| `tags` | `TArray<FName>` | Classification labels (e.g. `"military"`, `"civilian"`, `"mounted"`) |
 | `heightDeltaLimitDefault` | `float` | Max elevation change this unit type can traverse per tile edge when no per-tile-type override is defined |
-| `heightDeltaLimits` | `HeightDeltaEntry[]` | Per-tile-type override table; mirrors the `movementCosts` pattern |
+| `heightDeltaLimits` | `TArray<FHeightDeltaEntry>` | Per-tile-type override table; mirrors the `movementCosts` pattern |
 
 #### HeightDeltaEntry Struct
 
 ```
-HeightDeltaEntry {
-  tileDefId:  string    // reference to a Tile Definition
-  limit:      float     // max elevation delta this unit type can traverse entering that tile type
+FHeightDeltaEntry {
+  TileDefId:  FName     // reference to a Tile Definition
+  Limit:      float     // max elevation delta this unit type can traverse entering that tile type
 }
 ```
 
@@ -158,9 +157,9 @@ Unit Type Definitions declare base attribute values for all core unit attributes
 custom attributes. See §13.1 below for the full core attribute set.
 
 ```
-AttributeDeclaration {
-  attributeId:  string
-  baseValue:    float
+FAttributeDeclaration {
+  AttributeId:  FName
+  BaseValue:    float
 }
 ```
 
@@ -210,8 +209,8 @@ resource's `stackSize`. The slot count is the capacity; a farmer with 5 slots ca
 5 distinct resource stacks simultaneously, a knight with 2 slots can carry 2.
 
 ```
-UnitInventoryDeclaration {
-  slotCount:  int    // number of generic carry slots this unit type has
+FUnitInventoryDeclaration {
+  SlotCount:  int32    // number of generic carry slots this unit type has
 }
 ```
 
@@ -230,10 +229,10 @@ carry capacity should design separate unit types.
 Units declare named equipment slots that equippable resources may be placed into.
 
 ```
-EquipmentSlotDeclaration {
-  slotId:    string    // unique within this unit type e.g. "head", "body", "neck", "weapon"
-  slotType:  string    // type string matched against resource fitsSlotTypes
-  label:     string
+FEquipmentSlotDeclaration {
+  SlotId:    FName      // unique within this unit type e.g. "head", "body", "neck", "weapon"
+  SlotType:  FName      // matched against resource fitsSlotTypes
+  Label:     FString
 }
 ```
 
@@ -264,8 +263,8 @@ A unit type declares zero or more ability references in its definition. These ar
 abilities the unit has when spawned, before any equipment or tech grants are applied.
 
 ```
-UnitTypeAbilityRef {
-  abilityDefId:  string
+FUnitTypeAbilityRef {
+  AbilityDefId:  FName
 }
 ```
 
@@ -278,21 +277,21 @@ Every player belongs to exactly one faction. Faction membership determines the "
 relationship for combat purposes.
 
 ```
-PlayerDefinition {
-  id:        string
-  name:      string
-  factionId: string    // reference to a FactionDefinition
+FPlayerDefinition {
+  Id:        FName
+  Name:      FString
+  FactionId: FName    // reference to a FactionDefinition
 }
 
-FactionDefinition {
-  id:            string
-  name:          string
-  relationships: FactionRelationship[]
+FFactionDefinition {
+  Id:            FName
+  Name:          FString
+  Relationships: TArray<FFactionRelationship>
 }
 
-FactionRelationship {
-  targetFactionId: string
-  stance:          "friendly" | "neutral" | "hostile"
+FFactionRelationship {
+  TargetFactionId: FName
+  Stance:          "friendly" | "neutral" | "hostile"    // UENUM
 }
 ```
 
@@ -319,43 +318,53 @@ Faction relationships are the sole arbiter of the "is enemy" test. There is no s
 `IInventoryHolder` (see §0). Fields from these interfaces are not repeated inline below.
 
 ```
-UnitActor {
-  // IDamageable:      currentHealth
-  // IAttributeHolder: attributes
-  // IModifiable:      modifierStack
-  // IEquippable:      equipmentSlots
-  // IInventoryHolder: inventory (CarrySlot[])
+// FUnitState — entry in AUnitManagerActor's FFastArraySerializer TArray
+// (implements IDamageable, IAttributeHolder, IModifiable, IEquippable, IInventoryHolder)
 
-  id:                  string
-  unitTypeDefId:       string
-  ownerId:             string
-  assignedBuildingId:  string | null
-  position:            { x: float, y: float }
-  state:               "idle" | "pathing" | "working" | "waiting" | "returning" |
-                       "constructing" | "combat" | "dead"
-  currentPath: {
-    clusterPath:  ClusterCoord[]
-    localPath:    TileCoord[]
-  }
-  currentJob:          JobAssignment | null
-  inventory:           CarrySlot[]
+FUnitState {
+  // IDamageable:
+  CurrentHealth:       float
 
-  // Combat runtime state
-  attackTargetId:      string | null
-  attackCooldown:      float
+  // IAttributeHolder:
+  Attributes:          TArray<FAttributeDeclaration>
+
+  // IModifiable:
+  ModifierStack:       TArray<FModifier>
+
+  // IEquippable:
+  EquipmentSlots:      TArray<FEquipmentSlotInstance>
+
+  // IInventoryHolder:
+  Inventory:           TArray<FCarrySlot>
+
+  Id:                  FName
+  UnitTypeDefId:       FName
+  OwnerId:             FName
+  AssignedBuildingId:  TOptional<FName>
+  Position:            FVector2D             // world-unit X/Y
+  State:               "idle" | "pathing" | "working" | "waiting" | "returning" |
+                       "constructing" | "combat" | "dead"    // UENUM
+  ClusterPath:         TArray<FIntPoint>     // high-level cluster route
+  LocalPath:           TArray<FIntPoint>     // tile-level path within current cluster
+  CurrentJob:          TOptional<FJobAssignment>
+
+  // Combat runtime
+  AttackTargetId:      TOptional<FName>
+  AttackCooldown:      float
+  GrantedAbilities:    TArray<FName>
 }
 
-CarrySlot {
-  resourceDefId:  string | null   // null = empty slot
-  quantity:       int
+FCarrySlot {
+  ResourceDefId:  FName     // NAME_None = empty slot
+  Quantity:       int32
 }
 
-JobAssignment {
-  taskDefId:           string
-  stepDefId:           string
-  targetBuildingId:    string | null
-  targetAccessPointId: string | null
-  stepProgress:        float
+FJobAssignment {
+  TaskDefId:           FName
+  StepDefId:           FName
+  TargetBuildingId:    TOptional<FName>
+  TargetAccessPointId: TOptional<FName>
+  StepProgress:        float
 }
 ```
 
@@ -454,12 +463,14 @@ Designers may declare additional attributes on any Definition. Custom attributes
 the same modifier system as core attributes.
 
 ```
-CustomAttributeDefinition {
-  attributeId:   string    // e.g. "piety", "energy", "morale"
-  displayName:   string
-  baseValue:     float
-  minValue:      float?    // optional clamp
-  maxValue:      float?
+FCustomAttributeDefinition {
+  AttributeId:   FName      // e.g. "piety", "energy", "morale"
+  DisplayName:   FString
+  BaseValue:     float
+  MinValue:      float      // used when bHasMinValue = true
+  MaxValue:      float      // used when bHasMaxValue = true
+  bHasMinValue:  bool
+  bHasMaxValue:  bool
 }
 ```
 
@@ -469,19 +480,19 @@ from any source (equipment, techs, events).
 ### 13.3 Modifier
 
 ```
-Modifier {
-  id:               string              // unique instance id
-  sourceId:         string              // who applied this (tech id, resource def id, event id)
-  tags:             string[]            // queryable labels on this modifier e.g. "cursed"
-  grantsTag:        string | null       // if set, the entity bearing this modifier gains this tag
-                                        // e.g. MEDAL resource grants "ROYALTY" tag
-  attributeTarget:  string | null       // attribute id this modifier affects; null if tag/task-only
-  operation:        "additive" | "multiplicative"
-  value:            float               // additive: flat delta; multiplicative: factor (0.1 = +10%)
-  duration:         float | "indefinite"  // seconds; "indefinite" = until explicitly removed
-  elapsed:          float               // runtime: seconds this modifier has been active
-  enablesTasks:     string[]            // task ids to enable on the entity while this modifier is active
-  disablesTasks:    string[]            // task ids to disable on the entity while this modifier is active
+FModifier {
+  Id:               FName              // unique instance id
+  SourceId:         FName              // who applied this (tech id, resource def id, event id)
+  Tags:             TArray<FName>      // queryable labels e.g. "cursed", "armour"
+  GrantsTag:        FName              // NAME_None if not granting a tag;
+                                       // e.g. MEDAL resource grants "ROYALTY" tag
+  AttributeTarget:  FName              // NAME_None if tag/task-only
+  Operation:        "additive" | "multiplicative"    // UENUM
+  Value:            float              // additive: flat delta; multiplicative: factor (0.1 = +10%)
+  Duration:         float              // seconds; -1.0f = indefinite (until explicitly removed)
+  Elapsed:          float              // runtime: seconds this modifier has been active
+  EnablesTasks:     TArray<FName>      // task ids to enable while this modifier is active
+  DisablesTasks:    TArray<FName>      // task ids to disable while this modifier is active
 }
 ```
 
@@ -558,61 +569,54 @@ the effect fires. Abilities range from direct damage to buffs to AoE effects.
 ### 17.1 AbilityDefinition
 
 ```
-AbilityDefinition {
-  id:                string
-  name:              string
-  icon:              asset ref
-  description:       string
+FAbilityDefinition {
+  Id:                FName
+  Name:              FString
+  Icon:              TSoftObjectPtr<UTexture2D>
+  Description:       FString
 
   // Targeting
-  targetType:        AbilityTargetType
+  TargetType:        EAbilityTargetType    // UENUM; see below
+  TargetRadius:      float                 // used for tile_position and all_in_radius types
+  TargetConstraint:  FAbilityTargetConstraint
 
   // Activation
-  cooldown:          float              // seconds between uses; 0 = no cooldown
-  resourceCosts:     AbilityCost[]      // optional attribute costs to activate
-  autocast:          bool               // if true, unit uses this ability automatically
-                                        // without a player command when conditions are met
-  autocondition:     AbilityScript?     // evaluated each tick when autocast=true;
-                                        // ability fires if script returns true
+  Cooldown:          float              // seconds between uses; 0 = no cooldown
+  ResourceCosts:     TArray<FAbilityCost>
+  bAutocast:         bool
+  AutoCondition:     FAbilityScript     // evaluated each tick when bAutocast=true
 
   // Effect
-  effects:           AbilityEffect[]
+  Effects:           TArray<FAbilityEffect>
 }
 ```
 
-#### AbilityTargetType
+#### AbilityTargetType (UENUM)
 
 ```
-AbilityTargetType =
-    { type: "single_entity", constraints: AbilityTargetConstraint }
-      // player selects one entity (unit or building)
-  | { type: "tile_position", radius: float, constraints: AbilityTargetConstraint }
-      // player selects a tile; effect applies to all valid targets within radius
-  | { type: "self" }
-      // ability targets the caster itself; no player selection required
-  | { type: "all_in_radius", radius: float, constraints: AbilityTargetConstraint }
-      // fires on all valid targets within radius of caster; no player selection
+EAbilityTargetType:
+  SingleEntity    // player selects one entity (unit or building)
+  TilePosition    // player selects a tile; effect applies to all valid targets within TargetRadius
+  Self            // ability targets the caster; no player selection required
+  AllInRadius     // fires on all valid targets within TargetRadius of caster; no player selection
 ```
 
 #### AbilityTargetConstraint
 
 ```
-AbilityTargetConstraint {
-  factionStance:   "enemy" | "friendly" | "neutral" | "any"
-  entityTypes:     ("unit" | "building" | "world_object")[]   // empty = any
-  requiredTags:    string[]    // target must have all these tags
+FAbilityTargetConstraint {
+  FactionStance:   "enemy" | "friendly" | "neutral" | "any"    // UENUM
+  EntityTypes:     TArray<FName>    // "unit", "building", "world_object"; empty = any
+  RequiredTags:    TArray<FName>    // target must have ALL these tags
 }
 ```
 
 #### AbilityCost
 
-Abilities may spend attribute points from the caster as an activation cost (e.g. mana,
-energy, or any custom attribute declared on the unit type).
-
 ```
-AbilityCost {
-  attributeId:  string    // attribute to decrement on activation
-  amount:       float
+FAbilityCost {
+  AttributeId:  FName    // attribute to decrement on activation
+  Amount:       float
 }
 ```
 
@@ -621,36 +625,36 @@ If the caster does not have sufficient attribute value, the ability cannot be ac
 #### AbilityEffect
 
 ```
-AbilityEffect {
-  type: "deal_damage"
+FAbilityEffect {
+  Type: "deal_damage"
       | "apply_modifier"
       | "spawn_world_object"
       | "fire_event"
       | "heal"
-      | "teleport_to_tile"
+      | "teleport_to_tile"    // UENUM
 
   // for deal_damage:
-  damageAmount:        float?               // base damage before armour
-  damageScalesWith:    string?              // attribute id on caster to multiply damage by
-                                            // (e.g. "attackDamage"); nil = flat amount only
+  DamageAmount:        float        // base damage before armour; 0.0f = scale only
+  DamageScalesWith:    FName        // attribute id on caster; NAME_None = flat amount only
 
   // for apply_modifier:
-  modifierTemplate:    ModifierTemplate?
+  ModifierTemplate:    TOptional<FModifierTemplate>
 
   // for spawn_world_object:
-  resourceDefId:       string?
-  quantity:            int?
-  spawnAt:             "target" | "caster" | TileCoord?
+  SpawnResourceDefId:  FName
+  SpawnQuantity:       int32
+  SpawnAt:             FName        // "target" or "caster"; NAME_None = use SpawnTileCoord
+  SpawnTileCoord:      TOptional<FIntPoint>
 
   // for fire_event:
-  eventDefId:          string?
+  EventDefId:          FName        // NAME_None if unused
 
   // for heal:
-  healAmount:          float?
-  healScalesWith:      string?              // attribute id on caster
+  HealAmount:          float
+  HealScalesWith:      FName        // NAME_None = flat heal only
 
   // for teleport_to_tile:
-  destination:         TileCoord?           // or resolved at runtime from script
+  Destination:         TOptional<FIntPoint>
 }
 ```
 
