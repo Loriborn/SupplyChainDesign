@@ -588,6 +588,7 @@ EventFilter {
 | `ENABLE_BUILDING` | Re-enables a previously disabled building | `buildingActorId` |
 | `SPAWN_WORLD_OBJECT` | Creates a container world object at a position | `contents: [{resourceDefId, quantity}]`, `position \| "self"` |
 | `GRANT_ABILITY` | Grants an ability to a specific unit or building actor | `abilityDefId`, `targetEntityId` |
+| `REVOKE_ABILITY` | Removes a granted ability; passive effects deactivate immediately | `abilityDefId`, `targetEntityId` |
 | `SET_FACTION_STANCE` | Changes the relationship stance between two factions | `factionId`, `targetFactionId`, `stance: "friendly" \| "neutral" \| "hostile"` |
 | `APPLY_TECH` | Applies a technology | `techDefId`, `ownerId` |
 | `EMIT_LOG` | Writes to simulation log | `message: string` |
