@@ -104,7 +104,7 @@ and `inventory_max` preconditions.
 Inventory structures per entity type:
 - **Units** — `CarrySlot[]` (generic, count-bounded; see §6.5 and §9 below)
 - **Buildings** — `InventorySlot[]` for local and available namespaces (see [Buildings/Jobs §4.6, §8](BUILDINGS_JOBS.md))
-- **World Objects** — `{ resourceDefId, quantity }` single-resource container (see [Resources §16.3](RESOURCES.md))
+- **World Objects** — `contents: ContainerSlot[]` multi-resource container (see [Resources §16.3](RESOURCES.md))
 
 ---
 
@@ -173,7 +173,7 @@ At minimum every Unit Type Definition declares: `maxHealth`, `armour`, `movement
 |---|---|---|
 | `canConstruct` | `bool` | Whether this unit type may execute Construction Tasks |
 
-### 6.4 Combat Flags
+### 6.4 Combat Flags & Target Selection
 
 Combat behavior is declared as boolean flags. Numeric combat values are handled through
 the attribute system (§13).
@@ -181,8 +181,26 @@ the attribute system (§13).
 | Field | Type | Description |
 |---|---|---|
 | `controllable` | `bool` | Player may issue direct move/attack commands |
-| `fightsBack` | `bool` | Retaliates when attacked |
-| `autoEngages` | `bool` | Automatically attacks nearby enemies without a command |
+| `fightsBack` | `bool` | Retaliates when attacked. Unit auto-casts its default attack ability on its attacker when struck, if not already in combat. |
+| `autoEngages` | `bool` | Automatically attacks nearby enemies without a command. "Nearby" is defined as within the unit's effective `attackRange`. "Enemy" is any unit or building whose `ownerId` belongs to a faction with a hostile relationship to this unit's faction (see §6.9). |
+| `targetSelectionPolicy` | `TargetSelectionPolicy` | Controls which enemy the unit selects when `autoEngages` or `fightsBack` is active. See below. |
+
+#### TargetSelectionPolicy
+
+```
+TargetSelectionPolicy =
+    "nearest"    // select the valid target closest to this unit's current position
+  | "weakest"    // select the valid target with the lowest effective currentHealth
+  | "strongest"  // select the valid target with the highest effective maxHealth
+  | "first"      // select the first valid target in world iteration order (deterministic
+                 // but arbitrary — useful for reproducibility in tests)
+```
+
+`targetSelectionPolicy` may be modified via the modifier stack (see §13) to allow techs or
+equipment to change a unit's targeting behaviour at runtime. Modifiers targeting this field
+replace the policy rather than stacking — the most recently applied modifier wins.
+
+Default: `"nearest"` if not specified on the Unit Type Definition.
 
 ### 6.5 Inventory Slots
 
@@ -240,6 +258,59 @@ work tasks. Any unit type with `controllable: true` may be directly commanded by
 player. The distinction between "worker" and "combat unit" exists only in how the designer
 configures the definition, not in any structural difference in the data model.
 
+### 6.8 Predefined Abilities
+
+A unit type declares zero or more ability references in its definition. These are the
+abilities the unit has when spawned, before any equipment or tech grants are applied.
+
+```
+UnitTypeAbilityRef {
+  abilityDefId:  string
+}
+```
+
+Abilities are a first-class definition type. See §17 for the full `AbilityDefinition` spec.
+
+### 6.9 Faction / Ownership Model
+
+Every unit and building actor has an `ownerId` that references a `PlayerDefinition`.
+Every player belongs to exactly one faction. Faction membership determines the "enemy"
+relationship for combat purposes.
+
+```
+PlayerDefinition {
+  id:        string
+  name:      string
+  factionId: string    // reference to a FactionDefinition
+}
+
+FactionDefinition {
+  id:            string
+  name:          string
+  relationships: FactionRelationship[]
+}
+
+FactionRelationship {
+  targetFactionId: string
+  stance:          "friendly" | "neutral" | "hostile"
+}
+```
+
+**Enemy determination:** A unit treats any actor whose owner belongs to a faction with
+`stance: "hostile"` toward the unit's own faction as an enemy. Neutral actors are ignored
+by `autoEngages` and `fightsBack`. Friendly actors are never targeted.
+
+**Game mode examples:**
+- *Team vs Team* — two faction groups, each faction's relationships pre-set to hostile
+  toward the opposing group.
+- *Free-for-all* — each player is its own faction; all inter-faction relationships set to
+  hostile.
+- *Diplomacy* — faction relationships may be changed at runtime via event actions
+  (e.g. `SET_FACTION_STANCE`), enabling alliances, betrayals, and ceasefires.
+
+Faction relationships are the sole arbiter of the "is enemy" test. There is no separate
+"ally" or "team" field — all of that is expressed through `FactionRelationship.stance`.
+
 ---
 
 ## 9. Unit Actors
@@ -288,6 +359,31 @@ JobAssignment {
 }
 ```
 
+### 9.0 Unit State Transitions
+
+State transitions are outcome-driven. The state reflects the unit's current activity and
+changes when a discrete outcome occurs, not on a fixed schedule.
+
+| Transition | Condition |
+|---|---|
+| any → `dead` | `currentHealth` reaches 0. Fires `on_unit_death`. Unit is removed from world. |
+| `idle` → `pathing` | Unit is assigned a destination (building access point or direct command). |
+| `pathing` → `idle` | Unit reaches destination with no pending task. |
+| `pathing` → `working` | Unit reaches building access point and claims a task step. |
+| `pathing` → `constructing` | Unit with `canConstruct: true` reaches a building in `"constructing"` state. |
+| `pathing` → `combat` | Unit with `autoEngages: true` detects an enemy within `attackRange` while pathing. Unit halts and engages. |
+| `working` → `waiting` | The unit is present at the building but no eligible task step is available (all steps blocked by preconditions, concurrency, or unit type mismatch). Unit stays assigned and waits for a step to become available. |
+| `working` → `returning` | Unit completes a `DELIVER_RESOURCE` or `COLLECT_RESOURCE` step that requires the unit to move away from its assigned building. The unit paths back to the building on completion. |
+| `returning` → `working` | Unit re-arrives at the assigned building's access point. |
+| `working` → `idle` | Unit's assigned building is demolished or unit is explicitly unassigned. |
+| `combat` → `idle` | Combat target is destroyed or moves out of `attackRange` and no other valid target is in range. |
+| `combat` → `pathing` | Player issues a move or assign command to the unit (`controllable: true` only). |
+| `idle` → `combat` | Unit with `autoEngages: true` detects a hostile actor within `attackRange`. |
+| `constructing` → `idle` | `BUILDING_COMPLETE` step fires; unit is released. |
+
+The `waiting` state means the unit is present at its building but blocked on step
+availability. `idle` means the unit has no assigned building and no pending action.
+
 ### 9.1 Assignment Rules
 
 - One building per unit at a time.
@@ -335,14 +431,22 @@ The following attributes are fixed and always present on every entity that decla
 Units and buildings declare which are applicable via `AttributeDeclaration` lists in their
 Definitions with their base values.
 
-| Attribute | Applies to | Description |
-|---|---|---|
-| `maxHealth` | All entities | Maximum health points |
-| `armour` | All entities | Damage reduction factor (0.0 = none; values reduce incoming damage) |
-| `movementSpeed` | Units | World units per second |
-| `attackDamage` | Units | Damage per attack |
-| `attackRange` | Units | Attack range in tiles |
-| `attackSpeed` | Units | Attacks per second |
+| Attribute | Applies to | Description | Floor |
+|---|---|---|---|
+| `maxHealth` | All entities | Maximum health points | 1 (cannot be reduced below 1 by modifiers) |
+| `armour` | All entities | Damage reduction factor (0.0 = none; implementation-defined formula) | 0.0 |
+| `movementSpeed` | Units | World units per second | 0.0 (unit stops moving if reduced to 0) |
+| `attackDamage` | Units | Damage per attack | 0.0 |
+| `attackRange` | Units | Attack range in tiles | 0.0 |
+| `attackSpeed` | Units | Attacks per second (governs default attack ability cooldown — see §17) | 0.0 |
+
+**Floor enforcement:** After composing base value + modifier stack, if the result is below
+the attribute's floor, the effective value is clamped to the floor. The floor applies to the
+composed effective value only — individual modifier values may be any float. `currentHealth`
+is additionally clamped to `[0, effectiveMaxHealth]` whenever `maxHealth` changes.
+
+**Custom attribute floors:** Defined via `CustomAttributeDefinition.minValue` / `maxValue`
+(see §13.2). Custom attributes have no hardcoded floor unless the designer specifies one.
 
 ### 13.2 Custom Attributes
 
@@ -438,6 +542,165 @@ separate task-management path at the equipment layer.
 
 ---
 
+---
+
+## 17. Abilities
+
+Abilities are player-invoked or auto-triggered active actions that units and buildings can
+perform. They are the mechanism for all direct combat interactions, targeted support actions,
+and any player-facing micro-management. Abilities are distinct from work tasks — they are
+not part of the macro economy system and do not interact with inventory steps.
+
+**Reference model:** BFME (Battle for Middle Earth) abilities — player selects a unit or
+building, clicks an ability button, selects a target (unit, building, tile, or area), and
+the effect fires. Abilities range from direct damage to buffs to AoE effects.
+
+### 17.1 AbilityDefinition
+
+```
+AbilityDefinition {
+  id:                string
+  name:              string
+  icon:              asset ref
+  description:       string
+
+  // Targeting
+  targetType:        AbilityTargetType
+
+  // Activation
+  cooldown:          float              // seconds between uses; 0 = no cooldown
+  resourceCosts:     AbilityCost[]      // optional attribute costs to activate
+  autocast:          bool               // if true, unit uses this ability automatically
+                                        // without a player command when conditions are met
+  autocondition:     AbilityScript?     // evaluated each tick when autocast=true;
+                                        // ability fires if script returns true
+
+  // Effect
+  effects:           AbilityEffect[]
+}
+```
+
+#### AbilityTargetType
+
+```
+AbilityTargetType =
+    { type: "single_entity", constraints: AbilityTargetConstraint }
+      // player selects one entity (unit or building)
+  | { type: "tile_position", radius: float, constraints: AbilityTargetConstraint }
+      // player selects a tile; effect applies to all valid targets within radius
+  | { type: "self" }
+      // ability targets the caster itself; no player selection required
+  | { type: "all_in_radius", radius: float, constraints: AbilityTargetConstraint }
+      // fires on all valid targets within radius of caster; no player selection
+```
+
+#### AbilityTargetConstraint
+
+```
+AbilityTargetConstraint {
+  factionStance:   "enemy" | "friendly" | "neutral" | "any"
+  entityTypes:     ("unit" | "building" | "world_object")[]   // empty = any
+  requiredTags:    string[]    // target must have all these tags
+}
+```
+
+#### AbilityCost
+
+Abilities may spend attribute points from the caster as an activation cost (e.g. mana,
+energy, or any custom attribute declared on the unit type).
+
+```
+AbilityCost {
+  attributeId:  string    // attribute to decrement on activation
+  amount:       float
+}
+```
+
+If the caster does not have sufficient attribute value, the ability cannot be activated.
+
+#### AbilityEffect
+
+```
+AbilityEffect {
+  type: "deal_damage"
+      | "apply_modifier"
+      | "spawn_world_object"
+      | "fire_event"
+      | "heal"
+      | "teleport_to_tile"
+
+  // for deal_damage:
+  damageAmount:        float?               // base damage before armour
+  damageScalesWith:    string?              // attribute id on caster to multiply damage by
+                                            // (e.g. "attackDamage"); nil = flat amount only
+
+  // for apply_modifier:
+  modifierTemplate:    ModifierTemplate?
+
+  // for spawn_world_object:
+  resourceDefId:       string?
+  quantity:            int?
+  spawnAt:             "target" | "caster" | TileCoord?
+
+  // for fire_event:
+  eventDefId:          string?
+
+  // for heal:
+  healAmount:          float?
+  healScalesWith:      string?              // attribute id on caster
+
+  // for teleport_to_tile:
+  destination:         TileCoord?           // or resolved at runtime from script
+}
+```
+
+### 17.2 Auto-Attack as an Ability
+
+There is no separate generic attack mechanism. All attacks — including basic auto-attacks —
+are abilities. Each unit type that can fight declares an **auto-attack ability**:
+
+```
+// Example auto-attack ability (illustrative)
+AbilityDefinition {
+  id:           "knight_basic_attack"
+  targetType:   { type: "single_entity", constraints: { factionStance: "enemy",
+                  entityTypes: ["unit", "building"], requiredTags: [] } }
+  cooldown:     1.0 / effectiveAttackSpeed    // derived from "attackSpeed" attribute
+  autocast:     true
+  autocondition: <target is within attackRange and faction is hostile>
+  effects: [
+    { type: "deal_damage", damageAmount: null, damageScalesWith: "attackDamage" }
+  ]
+}
+```
+
+The `attackSpeed` attribute governs the cooldown of the unit's auto-attack ability.
+`attackDamage` scales damage. Both are normal modifier targets. A unit with `autoEngages: true`
+auto-casts its default attack ability on the selected target (using `targetSelectionPolicy`).
+A unit with `fightsBack: true` auto-casts it specifically on its attacker.
+
+### 17.3 Ability Grants
+
+Units may gain additional abilities beyond their type definition through:
+- **Equipment:** A resource's `ModifierTemplate` may reference an ability id to grant.
+  A new field `grantsAbility: string | null` on `ModifierTemplate` records this.
+- **Technology:** A `TechEffect` with `type: "grant_ability"` adds an ability to all
+  current and future instances of a target definition.
+- **Event actions:** `GRANT_ABILITY` event action adds an ability to a specific unit actor
+  at runtime.
+
+Granted abilities are tracked on `UnitActor.grantedAbilities: string[]` (ability def ids).
+The unit's full ability set is `UnitTypeDefinition.abilities ∪ grantedAbilities`.
+
+### 17.4 Building Abilities
+
+Buildings may also declare abilities in their `BuildingDefinition`. Building abilities
+follow the same `AbilityDefinition` structure. A tower that fires a special player-triggered
+shot, or a shrine that casts a zone-wide buff, are both building abilities. Building abilities
+are activated by player command (or autocast if configured).
+
+---
+
 ## Key Constraints (Entities/Workers Domain)
 
 - **Entity capabilities are composable interfaces, not a hierarchy.** `IDamageable`,
@@ -448,13 +711,20 @@ separate task-management path at the equipment layer.
 - **Unit carry capacity is slot count, not a modifier.** The number of `CarrySlots` is
   fixed by the Unit Type Definition. It is not an attribute and cannot be changed by
   modifiers. Slot count defines capacity; resource `stackSize` defines per-slot quantity.
-- **Unit presence is a gate, not a trigger.** A step with `unitTypeId` blocks until a unit
-  of that type is present. A step with `tagRequirements` blocks until the present unit
-  satisfies all required tags. Dispatch is driven by the unit's job selection loop.
+- **Units never block tiles.** `TileInstance.occupantId` is only set by buildings. Units
+  overlap tiles and each other freely.
+- **Unit presence is a gate, not a trigger.** A step with `workerRequirements` blocks until
+  all required workers are present. Dispatch is driven by the unit's job selection loop.
 - **Tag resolution is always live.** `hasEntityTag` checks Definition tags and all active
   modifier-granted tags. Tags disappear when their granting modifier expires or is removed.
 - **Units are exclusively assigned.** One building per unit at a time. Removal mid-step
   cancels the step with no resource refund. Carried resources remain on the unit.
+- **All attacks are abilities.** There is no separate generic attack path. Auto-attack,
+  retaliation, and special abilities all flow through the `AbilityDefinition` system.
+- **Enemy determination is faction-based.** `ownerId` → `factionId` → `FactionRelationship.stance`.
+  "Enemy" means `stance: "hostile"`. All relationship configuration is in `FactionDefinition`.
+- **Core attribute floors are hardcoded.** `maxHealth ≥ 1`, `armour ≥ 0`,
+  `movementSpeed ≥ 0`, etc. Custom attributes clamp to designer-specified `minValue`/`maxValue`.
 - **Equipment is the sole mechanism for stat and capability modification.** There are no
   separate upgrade or patch structures. All changes — permanent or timed, unit or building —
   flow through the modifier stack and equipment system.

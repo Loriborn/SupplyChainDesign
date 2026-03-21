@@ -86,24 +86,27 @@ WorkTaskDefinition {
     crossTaskRefs:   []
   }
   steps: [
-    { id: "deliver_stone",   type: COLLECT_RESOURCE, unitTypeId: "builder", duration: 0,
-      tagRequirements: [], preconditions: [],
+    { id: "deliver_stone",   type: COLLECT_RESOURCE, duration: 0,
+      workerRequirements: [{ unitTypeId: "builder", count: 1, role: "required", tagRequirements: [] }],
+      preconditions: [],
       vars: { sourceBuildingId: null, resourceDefId: "stone",  quantity: 50,
               destinationNamespace: "local" } },
-    { id: "deliver_timber",  type: COLLECT_RESOURCE, unitTypeId: "builder", duration: 0,
-      tagRequirements: [], preconditions: [],
+    { id: "deliver_timber",  type: COLLECT_RESOURCE, duration: 0,
+      workerRequirements: [{ unitTypeId: "builder", count: 1, role: "required", tagRequirements: [] }],
+      preconditions: [],
       vars: { sourceBuildingId: null, resourceDefId: "timber", quantity: 20,
               destinationNamespace: "local" } },
-    { id: "lay_foundations", type: CONSUME_RESOURCE, unitTypeId: "builder", duration: 30,
-      tagRequirements: [],
+    { id: "lay_foundations", type: CONSUME_RESOURCE, duration: 30,
+      workerRequirements: [{ unitTypeId: "builder", count: 1, role: "required", tagRequirements: [] }],
       preconditions: [{ type: "inventory_min", resourceDefId: "stone",
                         namespace: "local", quantity: 50 }],
       vars: { resourceDefId: "stone",  quantity: 50, sourceNamespace: "local" } },
-    { id: "frame_structure", type: CONSUME_RESOURCE, unitTypeId: "builder", duration: 20,
-      tagRequirements: [], preconditions: [],
+    { id: "frame_structure", type: CONSUME_RESOURCE, duration: 20,
+      workerRequirements: [{ unitTypeId: "builder", count: 1, role: "required", tagRequirements: [] }],
+      preconditions: [],
       vars: { resourceDefId: "timber", quantity: 20, sourceNamespace: "local" } },
     { id: "complete",        type: BUILDING_COMPLETE, duration: 0,
-      tagRequirements: [], preconditions: [] }
+      workerRequirements: [], preconditions: [] }
   ]
 }
 ```
@@ -150,11 +153,27 @@ always enforced and cannot be overridden by script.
 AccessPoint {
   id:      string
   offset:  { x: int, y: int }
-  tags:    string[]
+  tags:    string[]     // labels used to filter which units may use this access point
 }
 ```
 
-Units path to the nearest reachable Access Point. If none declared, any adjacent tile is valid.
+Units path to the **nearest reachable Access Point they are permitted to use**. If no access
+points are declared, any adjacent tile is valid.
+
+**Access point tag filtering:** A `WorkerRequirement` entry on a step may optionally declare
+`accessPointTags: string[]`. If set, the assigned unit must path to an access point whose
+`tags` contain **all** of the specified tags. Units that cannot reach a valid tagged access
+point enter `"waiting_on_unit"` state.
+
+Example use cases:
+- A gatehouse with separate `"entry"` and `"exit"` access points that control unit flow direction.
+- A mill with a `"delivery"` access point for COLLECT_RESOURCE workers and a `"production"`
+  access point for operating workers, allowing physical separation of roles.
+- An access point tagged `"authorized_only"` used by a step requiring a specific unit type
+  or tag, while general workers use untagged access points.
+
+If `accessPointTags` is empty or omitted on the `WorkerRequirement`, any access point is
+eligible (nearest reachable is selected).
 
 ### 4.6 Inventory Declarations
 
@@ -223,32 +242,85 @@ WorkTaskDefinition {
 ```
 TaskConcurrencyRules {
   selfConcurrency:  "none" | "unlimited" | int
-  crossTaskMode:    "exclusive" | "open" | "whitelist" | "blacklist"
-  crossTaskRefs:    string[]
+  crossTaskMode:    "exclusive" | "open" | "script"
+  crossTaskScript:  string?     // script expression evaluated when crossTaskMode = "script"
+                                // receives: thisTask, candidateTask → returns bool (can coexist)
+  crossTaskRefs:    string[]    // reserved for future use; ignored when crossTaskMode = "script"
 }
 ```
 
-- Conflict resolution: the more restrictive rule always wins, checked in both directions.
+**`crossTaskMode` values:**
+- `"exclusive"` — this task cannot run alongside any other task on the same building.
+  Construction tasks use this.
+- `"open"` — no restriction; this task may run alongside any other task.
+- `"script"` — a script expression determines compatibility. The script receives the running
+  task and a candidate task as context and returns `true` (can coexist) or `false` (blocked).
+  This replaces the former `"whitelist"` / `"blacklist"` enum values with a more expressive
+  option: whitelist logic is `candidateTask.id in ["taskA", "taskB"]`, blacklist logic is
+  `candidateTask.id not in ["taskC"]`.
+
+**Conflict resolution:**
+1. Check this task's `crossTaskMode` against the candidate task.
+2. Check the candidate task's `crossTaskMode` against this task.
+3. The more restrictive result wins. If either direction returns `false` (blocked), the
+   lower-priority task enters `"blocked_concurrency"`.
+
 - Blocked tasks persist in `"blocked_concurrency"` until a concurrency recalculation dispatch runs.
-- Self-concurrency is always capped by `UnitRosterEntry.maxCount` for the relevant unit type.
+- Self-concurrency is always capped by the minimum of `selfConcurrency` and the sum of
+  `UnitRosterEntry.maxCount` across all relevant unit types.
 
 ### 5.3 Work Step Definition
 
 ```
 WorkStepDefinition {
-  id:            string
-  type:          WorkStepType
-  duration:      float              // seconds; 0 = instantaneous
-  unitTypeId:    string?            // step blocks until a unit of this type is present
-  tagRequirements: string[]         // the present unit must have ALL of these tags
-                                    // (checks definition tags + modifier-granted tags)
-  preconditions: StepPrecondition[]
-  vars:          StepVars
+  id:                string
+  type:              WorkStepType
+  duration:          float               // seconds; 0 = instantaneous
+  workerRequirements: WorkerRequirement[] // all must be simultaneously present to begin step
+  preconditions:     StepPrecondition[]
+  vars:              StepVars
+}
+
+WorkerRequirement {
+  unitTypeId:       string       // unit type that must be present
+  count:            int          // number of units of this type required (≥ 1)
+  tagRequirements:  string[]     // each present unit of this type must have ALL these tags
+                                 // (checks definition tags + modifier-granted tags)
+  accessPointTags:  string[]     // unit must path to an access point bearing ALL these tags;
+                                 // empty = any access point (see §4.5)
+  role:             "required" | "bonus"
+  bonusEffect:      BonusWorkerEffect?   // only meaningful when role = "bonus"
+}
+
+BonusWorkerEffect {
+  attributeId:  string    // attribute on the building or step to scale
+  scalePerUnit: float     // additive multiplier increment per bonus worker
+                          // e.g. scalePerUnit: 0.2 → each bonus unit adds 20% speed
 }
 ```
 
-`tagRequirements` enables task steps that require equipped items — e.g. a jousting step
-requiring `"ROYALTY"` which may be granted by a MEDAL resource in a NECK slot.
+**Multi-worker steps:** A step with multiple `WorkerRequirement` entries (e.g. "1 baker AND
+2 millers") requires all workers to be simultaneously present before execution begins. Steps
+with unsatisfied requirements enter `"waiting_on_unit"`.
+
+**Required workers:** Workers with `role: "required"` must all be present to start the step.
+They must remain present for the full duration. If any required worker is removed mid-step
+(player command or demolition), the step pauses immediately and enters `"waiting_on_unit"`
+until the slot is refilled.
+
+**Bonus workers:** Workers with `role: "bonus"` are optional — the step proceeds with only
+the required workers. Each additional bonus worker present scales a specified attribute
+(typically step speed or output rate) by `bonusEffect.scalePerUnit` per extra unit.
+
+**Example:** A construction step requiring `[{unitTypeId: "builder", count: 1, role: "required"},
+{unitTypeId: "builder", count: 3, role: "bonus", bonusEffect: {attributeId: "constructionSpeed",
+scalePerUnit: 0.25}}]` — builds with 1 worker at base speed; each of up to 3 bonus builders
+adds 25% speed. Maximum 4 builders total (1 required + 3 bonus).
+
+`tagRequirements` on a `WorkerRequirement` enables steps requiring equipped items —
+e.g. a jousting step requiring tag `"ROYALTY"` which may be granted by a MEDAL resource in a
+NECK slot. Access point tags may additionally filter which access point a worker uses to
+reach the building (see §4.5).
 
 ### 5.4 Step Preconditions
 
@@ -281,14 +353,86 @@ StepPrecondition {
 |---|---|---|
 | `GENERATE_RESOURCE` | Creates resource into an inventory slot | `resourceDefId`, `quantity`, `destinationNamespace` |
 | `CONSUME_RESOURCE` | Removes resource from an inventory slot | `resourceDefId`, `quantity`, `sourceNamespace` |
-| `TRANSFORM_RESOURCE` | Atomically consumes inputs, produces outputs | `inputs[]`, `outputs[]` |
-| `COLLECT_RESOURCE` | Sends unit to retrieve from external available inventory | `sourceBuildingId`, `resourceDefId`, `quantity`, `destinationNamespace` |
+| `TRANSFORM_RESOURCE` | Atomically consumes inputs, produces outputs. See §5.5.1. | `inputs[]`, `outputs[]` |
+| `COLLECT_RESOURCE` | Sends unit to retrieve from external available inventory. See §5.5.2. | `sourceBuildingId`, `resourceDefId`, `quantity`, `destinationNamespace` |
 | `DELIVER_RESOURCE` | Sends unit to deposit to external available inventory | `resourceDefId`, `quantity`, `sourceNamespace`, `destinationBuildingId` |
 | `EQUIP_ITEM` | Places a resource from inventory into an equipment slot | `resourceDefId`, `slotId`, `targetEntityId \| "self"` |
 | `UNEQUIP_ITEM` | Removes a non-locked resource from an equipment slot | `slotId`, `targetEntityId \| "self"`, `destinationNamespace` |
+| `SPAWN_UNIT` | Spawns a new unit actor at the building's access point. See §5.5.3. | `unitTypeDefId`, `spawnPosition`, `inheritOwnerId` |
 | `WAIT` | Pauses for duration; no state effect | *(none)* |
 | `FLAVOR_TEXT` | Emits timestamped log message | `message: string` |
 | `BUILDING_COMPLETE` | **Construction only.** Transitions to `"idle"`, releases constructors, fires event. Must be final step. | *(none)* |
+
+#### 5.5.1 TRANSFORM_RESOURCE vars
+
+`inputs[]` and `outputs[]` each contain an array of `TransformEntry`:
+
+```
+TransformEntry {
+  resourceDefId:  string
+  quantity:       int
+  namespace:      "local" | "available"
+}
+```
+
+The step atomically consumes all `inputs` and produces all `outputs` if and only if all
+input quantities are available. If any input is insufficient, the step blocks in
+`"waiting_on_precondition"` and is retried next tick.
+
+#### 5.5.2 COLLECT_RESOURCE with null sourceBuildingId
+
+When `sourceBuildingId` is `null`, the system resolves the source automatically:
+
+1. Find all buildings the placing player owns that have the required `resourceDefId` in
+   their `available` inventory with `quantity > 0`.
+2. Filter to buildings reachable by the assigned unit.
+3. Select the closest reachable building by pathing distance.
+4. If no such building exists, the step enters `"waiting_on_precondition"` and is retried
+   each tick until a valid source appears. The step does not fail — it waits indefinitely.
+
+`Connection` priority is respected: buildings connected to this building with higher priority
+are preferred among equidistant candidates.
+
+#### 5.5.3 SPAWN_UNIT vars
+
+```
+SpawnUnitVars {
+  unitTypeDefId:  string           // unit type to spawn
+  spawnPosition:  "access_point"   // spawn at the building's primary (first declared) access point
+              | "nearest_passable" // spawn at the nearest passable tile adjacent to the footprint
+  inheritOwnerId: bool             // if true, spawned unit inherits building's ownerId
+}
+```
+
+**Spawn mechanics:**
+- The spawned unit is created with full `maxHealth`, empty inventory, and initial `state: "idle"`.
+- It inherits the building's `ownerId` if `inheritOwnerId: true` (recommended default).
+- The spawned unit is not automatically assigned to any building — it is unassigned and idle.
+  Designers who want the unit assigned immediately should follow the `SPAWN_UNIT` step with a
+  `FIRE_EVENT` that triggers an assignment action.
+- The `on_unit_spawned` event hook fires on successful spawn (see §10.1).
+
+**Spawn capacity pattern (house example):**
+```
+// A "house" that spawns up to 5 workers, replacing each one that dies
+WorkTaskDefinition {
+  trigger: "loop"
+  steps: [
+    { type: WAIT, duration: 30 },      // 30-second gestation period
+    { type: SPAWN_UNIT,
+      workerRequirements: [],           // no worker needed; the building itself spawns
+      preconditions: [
+        { type: "inventory_max",        // block if spawned-worker count is at capacity
+          resourceDefId: "spawned_worker_count",  // tracked via a custom abstract resource
+          namespace: "local", quantity: 4 }        // max 5 workers (0-4 = 5 slots)
+      ],
+      vars: { unitTypeDefId: "villager", spawnPosition: "access_point", inheritOwnerId: true } },
+    { type: GENERATE_RESOURCE,
+      vars: { resourceDefId: "spawned_worker_count", quantity: 1, destinationNamespace: "local" } }
+  ]
+}
+// On on_unit_death, fire event that decrements "spawned_worker_count" by 1 to allow respawn
+```
 
 ### 5.6 Simulation-Level Task Controls
 
@@ -298,7 +442,13 @@ TaskInstanceControl {
   enabled:         bool
   priority:        "high" | "medium" | "low"
   executionMode:   "forever" | "once" | "count"
-  executionCount:  int?
+  executionCount:  int?      // required when executionMode = "count"; decrements each cycle
+  completeBehavior: "terminal" | "reset"
+                    // "terminal": when executionCount reaches 0, state = "complete" permanently;
+                    //             task cannot run again unless an event action resets executionCount
+                    //             and sets state back to "idle"
+                    // "reset":    when executionCount reaches 0, task loops from step 0 again;
+                    //             designers use this for repeating-but-limited patterns
   state:           "idle" | "running" | "blocked_concurrency" |
                    "waiting_on_precondition" | "waiting_on_unit" | "complete"
   progress: {
@@ -307,6 +457,11 @@ TaskInstanceControl {
   }
 }
 ```
+
+`executionMode: "complete"` is fully designer-controlled. There is no hardcoded terminal
+state — the `completeBehavior` field determines what happens when the count is exhausted.
+An `ENABLE_TASK` event action (or a new `RESET_TASK_COUNT` action) can restart a terminal
+task if the game design requires it.
 
 ---
 
@@ -331,6 +486,10 @@ BuildingActor {
   rotation:             0 | 90 | 180 | 270
   rotatedFootprint:     bool[][]                     // Definition footprint transformed by rotation
   state:                "constructing" | "idle" | "working" | "blocked" | "disabled"
+                        // "disabled": building is fully non-functional — no tasks run,
+                        //   no new unit assignments are processed, existing assignments
+                        //   are paused. Triggered and cleared by DISABLE_BUILDING /
+                        //   ENABLE_BUILDING event actions respectively.
   constructionControl:  TaskInstanceControl | null
   localInventory:       InventorySlot[]
   availableInventory:   InventorySlot[]
@@ -370,12 +529,12 @@ are handled by replacing or upgrading the slot declaration via equipment (see [R
 | Hook | Fires when | Payload |
 |---|---|---|
 | `on_building_placed` | Building successfully placed | `buildingActorId`, `tileCoord`, `zoneId` |
-| `on_building_demolished` | Building removed by player | `buildingActorId`, `defId`, `tileCoord`, `zoneId` |
+| `on_building_demolished` | Building removed by player (see §10.4 for demolition mechanics) | `buildingActorId`, `defId`, `tileCoord`, `zoneId` |
 | `on_building_damaged` | Building takes damage | `buildingActorId`, `damage`, `currentHealth`, `attackerId` |
 | `on_building_destroyed` | Building health reaches 0 | `buildingActorId`, `defId`, `ownerId`, `tileCoord` |
 | `on_construction_complete` | Building finishes constructing | `buildingActorId` |
 | `on_task_complete` | Task completes one full cycle | `buildingActorId`, `taskDefId` |
-| `on_resource_threshold` | Resource quantity crosses threshold | `buildingActorId \| zoneId`, `resourceDefId`, `quantity` |
+| `on_resource_threshold` | Resource quantity crosses a designer-configured threshold (see §10.5) | `buildingActorId \| zoneId`, `resourceDefId`, `quantity`, `direction` |
 | `on_zone_ownership_change` | Zone changes owner | `zoneId`, `previousOwnerId`, `newOwnerId` |
 | `on_unit_assigned` | Unit assigned to building | `unitActorId`, `buildingActorId` |
 | `on_unit_damaged` | Unit takes damage | `unitActorId`, `damage`, `currentHealth`, `attackerId` |
@@ -387,6 +546,8 @@ are handled by replacing or upgrading the slot declaration via equipment (see [R
 | `on_world_object_pickup` | World object collected by a unit | `worldObjectActorId`, `unitActorId` |
 | `on_tech_applied` | Technology takes effect | `techDefId`, `ownerId` |
 | `on_objective_complete` | Zone objective threshold met | `objectiveId`, `zoneId` |
+| `on_unit_spawned` | Unit created by a `SPAWN_UNIT` step | `unitActorId`, `unitTypeDefId`, `buildingActorId`, `position` |
+| `on_faction_stance_changed` | Faction relationship stance updated | `factionId`, `targetFactionId`, `newStance` |
 | `on_flag_set` | Named event flag set to `true` | `flagId` |
 
 ### 10.2 Event Definition
@@ -420,11 +581,73 @@ EventFilter {
 | `SET_ZONE_OWNER` | Transfers zone ownership | `zoneId`, `newOwnerId` |
 | `ADD_SCOPED_RESOURCE` | Adds to zone-scoped resource | `zoneId`, `resourceDefId`, `quantity` |
 | `SET_FLAG` | Sets named world flag | `flagId`, `value: bool` |
-| `FIRE_EVENT` | Fires another event immediately | `eventDefId` |
+| `FIRE_EVENT` | Fires another event immediately. Designer is responsible for avoiding infinite event loops. | `eventDefId` |
 | `ENABLE_TASK` | Enables/disables a task on a building | `buildingActorId`, `taskDefId`, `enabled: bool` |
-| `SPAWN_WORLD_OBJECT` | Creates a world object at a position | `resourceDefId`, `quantity`, `position \| "self"` |
+| `RESET_TASK_COUNT` | Resets `executionCount` and state to "idle" for a count-mode task | `buildingActorId`, `taskDefId`, `newCount: int` |
+| `DISABLE_BUILDING` | Disables a building — fully non-functional, no tasks run | `buildingActorId` |
+| `ENABLE_BUILDING` | Re-enables a previously disabled building | `buildingActorId` |
+| `SPAWN_WORLD_OBJECT` | Creates a container world object at a position | `contents: [{resourceDefId, quantity}]`, `position \| "self"` |
+| `GRANT_ABILITY` | Grants an ability to a specific unit or building actor | `abilityDefId`, `targetEntityId` |
+| `SET_FACTION_STANCE` | Changes the relationship stance between two factions | `factionId`, `targetFactionId`, `stance: "friendly" \| "neutral" \| "hostile"` |
 | `APPLY_TECH` | Applies a technology | `techDefId`, `ownerId` |
 | `EMIT_LOG` | Writes to simulation log | `message: string` |
+
+**Event loop note:** `FIRE_EVENT` can trigger another `FIRE_EVENT`, creating a chain. There
+is no system-level cycle detection or recursion depth limit. Designers are responsible for
+ensuring event chains terminate. Circular chains (Event A fires Event B which fires Event A)
+will loop indefinitely — this is a designer error, not an engine concern.
+
+### 10.4 Demolition Mechanics
+
+Demolition is initiated by a player action on a placed building. It is **instantaneous** —
+no animation timer or staged process. On demolition:
+
+1. All `localInventory` and `availableInventory` resources are **dropped at the building's
+   origin tile** as a single `ContainerWorldObject` holding all non-zero resource slots.
+   Empty slots produce no container entry. If all slots are empty, no world object is spawned.
+2. All units currently assigned to the building are **unassigned** (`assignedBuildingId` set
+   to `null`). Their current task step is cancelled with no resource refund.
+3. Any resources those units are currently carrying are **dropped at their current positions**
+   as individual container world objects (one per unit, or merged if the unit carries multiple
+   resource types — same container model as unit death drops).
+4. The building's footprint tiles have `occupantId` cleared, affected clusters are marked
+   `dirty`, and the `BuildingActor` is removed from the world.
+5. `on_building_demolished` fires with the building's last known state in the payload.
+
+Container world objects spawned by demolition use the **world-level generic container decay
+behavior** (see [Resources §16.3](RESOURCES.md)) unless the designer's `on_building_demolished`
+event handler overrides the behavior by intercepting and re-spawning with custom settings.
+
+**Abstract inventory:** Abstract resources stored in a building's `abstractInventory` are
+**not dropped** — they live in zone- or player-scoped storage and persist after demolition.
+
+### 10.5 Resource Threshold Configuration
+
+The `on_resource_threshold` hook requires a designer-authored **threshold configuration**
+attached to the building definition or zone. This tells the system what constitutes a
+crossing event.
+
+```
+ResourceThreshold {
+  id:            string
+  resourceDefId: string
+  namespace:     "local" | "available" | "scoped_inventory"
+  threshold:     float           // the quantity value to watch
+  direction:     "rising"        // fires when quantity crosses threshold upward
+               | "falling"       // fires when quantity crosses threshold downward
+               | "either"        // fires on any crossing in either direction
+  eventRef:      GameEventRef    // event to fire when threshold is crossed
+}
+```
+
+Thresholds are declared in the **Building Definition** (for building-scoped resources) or
+in the **Zone Definition** (for zone-scoped resources). A building may declare multiple
+thresholds on different resources or different directions for the same resource.
+
+**Crossing detection:** A threshold is crossed when the resource quantity transitions from
+one side to the other between ticks. A quantity that starts above threshold and falls below
+it in one tick fires a `"falling"` threshold. The event fires once per crossing — a quantity
+that stays above or below without crossing does not re-fire.
 
 ---
 
@@ -461,14 +684,36 @@ TechDefinition {
   id:             string
   name:           string
   description:    string
-  scope:          "global" | "zone"
+  prerequisites:  string[]            // techDefIds that must be in World.activeTechs (for
+                                      // the same ownerId) before this tech may be applied.
+                                      // Empty = no prerequisites (freely applicable).
+  scope:          "global" | "zone" | "team" | "faction"
   zoneId:         string?             // required if scope = "zone"
+  // "global"  — affects all instances of targetDefId owned by ownerId, worldwide
+  // "zone"    — affects only instances within the specified zone
+  // "team"    — affects all players sharing the same faction as ownerId
+  // "faction" — synonym for "team"; affects all units/buildings of the ownerId's faction
   targetType:     "unit_type" | "building_type"
-  targetDefId:    string              // which definition type this tech affects
+  targetTags:     string[]            // if non-empty, tech affects only entities of
+                                      // targetType that have ALL listed tags
+  targetDefId:    string?             // specific definition id to target; null = any
+                                      // entity of targetType (filtered by targetTags)
   cost:           ResourceCost[]      // { resourceDefId, quantity }[] to apply this tech
   effects:        TechEffect[]
 }
 ```
+
+**Tech tree:** Prerequisites form a directed acyclic graph. The engine validates that all
+listed prerequisite tech ids are already active for `ownerId` before allowing `APPLY_TECH`.
+There is no built-in tier or tree UI structure — the prerequisite graph is the tree. Designers
+layer prerequisites to create linear chains or branching trees (CIV / AOE style).
+
+**Revocation:** There is no `REVOKE_TECH` action. Technologies applied with `"indefinite"`
+effects are permanent for the session. To counteract a technology's effects, designers apply
+a new technology whose `ModifierTemplate` inverts the modifier (e.g. additive with negative
+value, or multiplicative with a complementary factor). Tag grants can be removed by a
+subsequent modifier that removes that tag. This is by design — tech acquisition is a
+one-way progression within a session.
 
 ### 15.2 Tech Effects
 
@@ -528,10 +773,24 @@ ActiveTech {
   are declared explicitly and are not modifier targets.
 - **Work Steps are the only mechanism for building-internal state change.** Inventory
   cannot change except through step execution.
+- **Multi-worker steps require all required workers simultaneously.** Partial fulfillment
+  does not start the step. Bonus workers are optional but may accelerate execution.
 - **Blocked tasks persist.** A concurrency-blocked task waits for a recalculation dispatch.
   It does not skip or cancel.
+- **Cross-task compatibility uses scripts, not whitelist/blacklist enums.** `crossTaskMode:
+  "script"` is the expressive option; `"exclusive"` and `"open"` remain for simple cases.
+- **Building "disabled" is fully non-functional.** No tasks run. Only `ENABLE_BUILDING`
+  event action clears this state.
+- **Demolition is instantaneous.** All inventory drops as a container at the origin tile.
+  Assigned units are unassigned; their carried resources drop at their positions.
 - **Placement rules are evaluated at placement time only.** Already-placed buildings are
   not re-validated if surrounding world state changes.
+- **Tech prerequisites must be satisfied.** `APPLY_TECH` is rejected if any listed
+  prerequisite tech is not already active for the same owner. Prerequisites form a DAG.
+- **Tech revocation is not supported.** Counter a tech's effects by applying an inverting
+  tech. The progression is one-way within a session.
 - **Technologies apply to types, not instances.** An `"indefinite"` tech modifier applies
   to all current instances and all future spawns of the target definition. A `"once"` tech
   effect applies only to instances alive at application time.
+- **Event loop safety is the designer's responsibility.** `FIRE_EVENT` chains are not
+  cycle-detected. Circular chains loop indefinitely.
