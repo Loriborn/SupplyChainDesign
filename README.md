@@ -10,9 +10,8 @@ technologies, and events.
 
 Bastion is implemented in **C++ and Blueprints for Unreal Engine 5.5** (primary target), with
 UE 5.7 as a forward-compatibility target depending on stability. All data structures and
-runtime logic are expressed exclusively in UE-native terms. There is no engine-agnostic
-abstraction layer and no Python or external demo — implementation is entirely in-engine in
-C++ and Blueprints.
+runtime logic are expressed exclusively in UE-native terms. Implementation is entirely
+in-engine in C++ and Blueprints.
 
 > **Critical UE constraints:** Units do **not** use `APawn`, `ACharacter`, or the built-in
 > `UNavigationSystem` / NavMesh. All movement and pathfinding is custom HPA\* (§12). Units
@@ -61,12 +60,12 @@ Each entity type implements only the interfaces relevant to its role. See §0 fo
 full interface definitions and implementation summary.
 
 **Unit implementation:** All units use a **Manager Actor + `FFastArraySerializer`** pattern
-(`AUnitManagerActor` owning a replicated `TArray<FUnitState>`). Individual `AActor` per unit
-was rejected because RTS zoom-out capability eliminates distance-based relevancy, collapsing
-worst-case channel count to ~10,400 (2,600 units × 4 clients) and making replication manager
-CPU cost the binding constraint. `FFastArraySerializer` collapses this to 4 channels.
-Rendering uses **AnimToTexture + HISMCs**. Position is full `float` X/Y. Units may overlap;
-path wobble via deterministic lateral bias (seeded from unit ID) provides visual variation.
+(`AUnitManagerActor` owning a replicated `TArray<FUnitState>`). RTS zoom-out capability
+eliminates distance-based relevancy, collapsing worst-case channel count to ~10,400
+(2,600 units × 4 clients) and making replication manager CPU cost the binding constraint.
+`FFastArraySerializer` collapses this to 4 channels. Rendering uses **AnimToTexture + HISMCs**.
+Position is full `float` X/Y. Units may overlap; path wobble via deterministic lateral bias
+(seeded from unit ID) provides visual variation.
 
 **Units do not use APawn, ACharacter, or UNavigationSystem.** Units are entries in
 `AUnitManagerActor`'s replicated state array. The built-in UE character movement component
