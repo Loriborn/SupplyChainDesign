@@ -11,21 +11,21 @@
 
 | Field | Type | Description |
 |---|---|---|
-| `id` | `string` | Unique identifier |
-| `name` | `string` | Display name |
-| `icon` | `asset ref` | Visual representation |
+| `id` | `FName` | Unique identifier |
+| `name` | `FString` | Display name |
+| `icon` | `TSoftObjectPtr<UTexture2D>` | Visual representation |
 | `passable` | `bool` | Whether Units can traverse this tile at all (universal) |
 | `movementCostDefault` | `float` | Fallback pathing weight for unlisted unit types (1.0 = normal) |
-| `movementCosts` | `MovementCostEntry[]` | Per-unit-type cost overrides |
+| `movementCosts` | `TArray<FMovementCostEntry>` | Per-unit-type cost overrides |
 | `allowedForBuilding` | `bool` | Default permission for building placement |
-| `tags` | `string[]` | Classification labels used by placement rule scripts |
+| `tags` | `TArray<FName>` | Classification labels used by placement rule scripts |
 
 #### MovementCostEntry Struct
 
 ```
-MovementCostEntry {
-  unitTypeId:  string
-  cost:        float
+FMovementCostEntry {
+  UnitTypeId:  FName
+  Cost:        float
 }
 ```
 
@@ -34,25 +34,20 @@ MovementCostEntry {
 2. Fall back to tile's `movementCostDefault`.
 3. Fall back to universal default `1.0`.
 
-#### TileCoord Struct
+#### TileCoord
 
-```
-TileCoord {
-  x:  int
-  y:  int
-}
-```
+Tile coordinates use `FIntPoint` (`X`, `Y`).
 
 ### 1.2 Tile Instance Struct (World State)
 
 | Field | Type | Description |
 |---|---|---|
-| `tileDefId` | `string` | Reference to Tile Definition |
-| `elevation` | `int` | Elevation of this cell in height units above the base datum (0 = water level). Multiply by `World.heightScalar` to get world-unit height. |
-| `occupantId` | `string \| null` | Building Actor occupying this cell, if any. Units never set this field — only buildings do. |
-| `zoneId` | `string \| null` | Zone this cell belongs to, if any. `null` = unclaimed; any player may build on unclaimed tiles unless a placement rule prevents it. |
+| `tileDefId` | `FName` | Reference to Tile Definition |
+| `elevation` | `int32` | Elevation of this cell in height units above the base datum (0 = water level). Multiply by `World.heightScalar` to get world-unit height. |
+| `occupantId` | `TOptional<FName>` | Building Actor occupying this cell, if any. Units never set this field — only buildings do. |
+| `zoneId` | `TOptional<FName>` | Zone this cell belongs to, if any. Unset = unclaimed; any player may build on unclaimed tiles unless a placement rule prevents it. |
 
-Stored as flat array indexed by `y * mapWidth + x`.
+Stored as flat `TArray<FTileInstance>` indexed by `Y * MapWidth + X`.
 
 ### 1.3 Elevation & Pathfinding
 
@@ -81,13 +76,13 @@ Elevation also contributes an additive cost to passable edges, scaled by
 
 | Field | Type | Description |
 |---|---|---|
-| `mapWidth` | `int` | Map width in tiles |
-| `mapHeight` | `int` | Map height in tiles |
-| `tileSize` | `float` | Physical size of one tile in world units (UE: cm) |
-| `clusterSize` | `int` | Tiles per cluster edge for hierarchical pathfinding |
-| `heightScalar` | `float` | World-unit height per elevation integer unit. Multiply `TileInstance.elevation` by this to get world-unit height (e.g. UE: cm). Default: `100.0`. |
+| `mapWidth` | `int32` | Map width in tiles |
+| `mapHeight` | `int32` | Map height in tiles |
+| `tileSize` | `float` | Physical size of one tile in world units (cm) |
+| `clusterSize` | `int32` | Tiles per cluster edge for hierarchical pathfinding |
+| `heightScalar` | `float` | World-unit height per elevation integer unit. Multiply `TileInstance.elevation` by this to get world-unit height (cm). Default: `100.0`. |
 | `elevationCostFactor` | `float` | Scalar applied to elevation delta in edge cost formula. `0.0` = elevation costless but still blocks. `1.0` = 1 elevation unit = 1.0 added to edge cost. Default: `1.0` |
-| `pathBudgetPerTick` | `int` | Maximum path requests processed per simulation tick. Recommended range: 50–200 depending on map size and expected unit density. Prevents burst spikes on group move orders. |
+| `pathBudgetPerTick` | `int32` | Maximum path requests processed per simulation tick. Recommended range: 50–200 depending on map size and expected unit density. Prevents burst spikes on group move orders. |
 
 ---
 
@@ -104,7 +99,7 @@ receive `zoneId: null` (unclaimed).
 1. Author the zone map as a separate image asset alongside the tile heightmap.
 2. Define a colour-to-zone dictionary in the world definition:
    ```
-   ZoneColorEntry { color: color, zoneDefId: string }
+   FZoneColorEntry { Color: FLinearColor, ZoneDefId: FName }
    ```
 3. At world load, iterate every tile and set `TileInstance.zoneId` from the decoded entry.
 4. Tiles with `zoneId: null` are unclaimed. Any player may build on them unless a
@@ -122,26 +117,26 @@ tile. To change which zone a tile belongs to requires re-authoring and reloading
 
 | Field | Type | Description |
 |---|---|---|
-| `id` | `string` | Unique identifier |
-| `name` | `string` | Display name |
-| `color` | `color` | Map overlay color |
-| `startingOwnerId` | `string \| null` | Owning player or faction at world start |
+| `id` | `FName` | Unique identifier |
+| `name` | `FString` | Display name |
+| `color` | `FLinearColor` | Map overlay color |
+| `startingOwnerId` | `TOptional<FName>` | Owning player or faction at world start; unset = unclaimed |
 
 ### 2.2 Zone Instance (World State)
 
 | Field | Type | Description |
 |---|---|---|
-| `zoneDefId` | `string` | Reference to Zone Definition |
-| `currentOwnerId` | `string \| null` | Current owner; `null` = unclaimed |
-| `scopedInventory` | `ScopedInventorySlot[]` | Zone-level abstract resource quantities |
+| `zoneDefId` | `FName` | Reference to Zone Definition |
+| `currentOwnerId` | `TOptional<FName>` | Current owner; unset = unclaimed |
+| `scopedInventory` | `TArray<FScopedInventorySlot>` | Zone-level abstract resource quantities |
 
 ### 2.3 Zone-Scoped Resources
 
 ```
-ScopedInventorySlot {
-  resourceDefId:  string
-  quantity:       float
-  capacity:       float     // -1 = uncapped
+FScopedInventorySlot {
+  ResourceDefId:  FName
+  Quantity:       float
+  Capacity:       float     // -1.0f = uncapped
 }
 ```
 
@@ -162,14 +157,14 @@ Resources with `abstract: true` and `storageScope: "zone"` accumulate here. See
 ### 2.5 Zone Objectives
 
 ```
-ZoneObjective {
-  id:              string
-  zoneId:          string
-  description:     string
-  resourceDefId:   string
-  targetQuantity:  float
-  scope:           "available_inventory" | "scoped_inventory" | "either"
-  completionEvent: GameEventRef
+FZoneObjective {
+  Id:              FName
+  ZoneId:          FName
+  Description:     FString
+  ResourceDefId:   FName
+  TargetQuantity:  float
+  Scope:           "available_inventory" | "scoped_inventory" | "either"    // UENUM
+  CompletionEvent: FName    // GameEventRef — id of an EventDefinition
 }
 ```
 
@@ -197,60 +192,61 @@ Nothing is cached outside of World state.
 
 | Field | Type | Description |
 |---|---|---|
-| `mapWidth` | `int` | Map width in tiles |
-| `mapHeight` | `int` | Map height in tiles |
-| `tileSize` | `float` | World-unit size of one tile (UE: cm) |
-| `clusterSize` | `int` | Tiles per cluster edge |
+| `mapWidth` | `int32` | Map width in tiles |
+| `mapHeight` | `int32` | Map height in tiles |
+| `tileSize` | `float` | World-unit size of one tile (cm) |
+| `clusterSize` | `int32` | Tiles per cluster edge |
 | `heightScalar` | `float` | See §1.4 |
 | `elevationCostFactor` | `float` | See §1.4 |
-| `pathBudgetPerTick` | `int` | See §1.4 |
-| `tiles` | `TileInstance[]` | Flat array; index = `y * mapWidth + x` |
-| `clusterGraph` | `ClusterGraph` | Hierarchical pathfinding graph; see §12 |
-| `pathRequestQueue` | `PathRequest[]` | Pending pathfinding requests |
-| `zones` | `ZoneInstance[]` | All zone instances |
-| `buildingActors` | `BuildingActor[]` | All placed buildings |
-| `unitActors` | `UnitActor[]` | All active units (managed by `AUnitManagerActor`) |
-| `worldObjectActors` | `WorldObjectActor[]` | All active world objects (dropped items, relics, etc.) |
-| `playerStateActors` | `PlayerStateActor[]` | One per player; holds player-scoped abstract resources |
-| `activeTechs` | `ActiveTech[]` | Technologies currently in effect |
+| `pathBudgetPerTick` | `int32` | See §1.4 |
+| `tiles` | `TArray<FTileInstance>` | Flat array; index = `Y * MapWidth + X` |
+| `clusterGraph` | `FClusterGraph` | Hierarchical pathfinding graph; see §12 |
+| `pathRequestQueue` | `TArray<FPathRequest>` | Pending pathfinding requests |
+| `zones` | `TArray<FZoneInstance>` | All zone instances |
+| `buildingActors` | `TArray<ABuildingActor*>` | All placed buildings |
+| `unitActors` | `TArray<FUnitState>` | All active units (owned by `AUnitManagerActor`) |
+| `worldObjectActors` | `TArray<AWorldObjectActor*>` | All active world objects |
+| `playerStateActors` | `TArray<FPlayerStateData>` | One per player; player-scoped abstract resources |
+| `activeTechs` | `TArray<FActiveTech>` | Technologies currently in effect |
 | `clock` | `float` | Simulation time elapsed in seconds |
-| `eventQueue` | `GameEvent[]` | Pending events |
-| `eventFlags` | `Map<string, bool>` | Named boolean flags |
-| `objectives` | `ZoneObjective[]` | Active objectives |
+| `eventQueue` | `TArray<FGameEvent>` | Pending events |
+| `eventFlags` | `TMap<FName, bool>` | Named boolean flags |
+| `objectives` | `TArray<FZoneObjective>` | Active objectives |
 
-**Time model:** Delta time per frame (UE: `DeltaSeconds`), framerate-agnostic. Speed multiplier
-applied as scalar on delta time. Python demo uses fixed delta time per loop iteration.
+**Time model:** Delta time per frame (`DeltaSeconds`), framerate-agnostic. Speed multiplier
+applied as scalar on delta time.
 
 ### 7.1 Supporting Structs
 
-**`ResourceCost`** — a quantity of a specific resource required or consumed by a system
+**`FResourceCost`** — a quantity of a specific resource required or consumed by a system
 operation (construction cost, tech cost, etc.):
 
 ```
-ResourceCost {
-  resourceDefId:  string
-  quantity:       int
+FResourceCost {
+  ResourceDefId:  FName
+  Quantity:       int32
 }
 ```
 
-**`GameEventRef`** — a string reference to a named `EventDefinition` id. Used wherever a
-system hook needs to fire a designer-authored event:
-
-```
-GameEventRef = string    // the id of an EventDefinition
-```
+**`GameEventRef`** — an `FName` referencing a named `EventDefinition` id. `NAME_None` = no
+event.
 
 ### 7.2 Player State Actor
 
 The **Player State Actor** is a non-spatial, per-player data container that accumulates
-abstract resources scoped to a player globally (i.e. not zone- or building-specific).
-It has no tile footprint and is not placed on the map. One instance exists per player
-for the lifetime of the simulation session.
+abstract resources scoped to a player globally (not zone- or building-specific). It has no
+tile footprint. One instance exists per player for the simulation session.
 
 ```
-PlayerStateActor {
-  playerId:          string
-  abstractInventory: AbstractInventorySlot[]
+FPlayerStateData {
+  PlayerId:          FName
+  AbstractInventory: TArray<FAbstractInventorySlot>
+}
+
+FAbstractInventorySlot {
+  ResourceDefId:  FName
+  Quantity:       float
+  Capacity:       float    // -1.0f = uncapped
 }
 ```
 
@@ -269,41 +265,33 @@ and rejected because per-tile movement costs (grass vs stone per unit type) brea
 simplification assumptions. **HPA\*** operates on a coarser cluster graph; local A* within
 each cluster uses full tile cost data.
 
-### 12.2 ClusterCoord Struct
+### 12.2 ClusterCoord
 
-```
-ClusterCoord {
-  x:  int
-  y:  int
-}
-```
+Cluster coordinates use `FIntPoint` (`X`, `Y`).
 
 ### 12.3 Cluster Graph
 
 ```
-ClusterGraph {
-  clusters:  Cluster[][]    // [clusterY][clusterX]
+FClusterGraph {
+  Clusters:  TArray<TArray<FCluster>>    // [ClusterY][ClusterX]
 }
 
-Cluster {
-  coord:      ClusterCoord
-  dirty:      bool               // triggers edge recomputation next tick
-  edges:      ClusterEdge[]
-  boundaries: ClusterBoundary[]  // one per adjacent cluster; populated at init / recompute
+FCluster {
+  Coord:      FIntPoint
+  bDirty:     bool                         // triggers edge recomputation next tick
+  Edges:      TArray<FClusterEdge>
+  Boundaries: TArray<FClusterBoundary>     // one per adjacent cluster
 }
 
-ClusterEdge {
-  targetCluster:  ClusterCoord
-  costs:          ClusterEdgeCost[]   // pre-computed per unit type
-  impassableFor:  string[]            // unitTypeIds that cannot cross this boundary;
-                                       // accounts for movement cost and the unit's own
-                                       // resolvedHeightDeltaLimit for the boundary tiles
+FClusterEdge {
+  TargetCluster:  FIntPoint
+  Costs:          TArray<FClusterEdgeCost>    // pre-computed per unit type
+  ImpassableFor:  TArray<FName>               // unitTypeIds that cannot cross this boundary
 }
 
-ClusterEdgeCost {
-  unitTypeId:  string
-  cost:        float    // pre-computed traversal cost incorporating tile movement costs
-                        // and elevation deltas at the cluster boundary
+FClusterEdgeCost {
+  UnitTypeId:  FName
+  Cost:        float    // pre-computed traversal cost (tile movement costs + elevation)
 }
 ```
 
@@ -323,24 +311,22 @@ column of the right cluster). Diagonal cluster adjacency is not used — boundar
 axis-aligned only.
 
 ```
-ClusterBoundary {
-  neighborCluster:  ClusterCoord     // the cluster on the other side of this boundary
-  direction:        "north" | "south" | "east" | "west"
-  entryPoints:      EntryPoint[]     // passable crossing points along this shared edge
+FClusterBoundary {
+  NeighborCluster:  FIntPoint                     // cluster on the other side of this boundary
+  Direction:        "north" | "south" | "east" | "west"    // UENUM
+  EntryPoints:      TArray<FEntryPoint>
 }
 
-EntryPoint {
-  tileA:    TileCoord    // tile on this cluster's side of the boundary
-  tileB:    TileCoord    // tile on the neighbor cluster's side (adjacent to tileA)
-  intraClusterCosts: IntraClusterCost[]  // cost from this entry point to every other
-                                          // entry point within the same cluster
+FEntryPoint {
+  TileA:               FIntPoint                  // tile on this cluster's side of the boundary
+  TileB:               FIntPoint                  // tile on the neighbor cluster's side
+  IntraClusterCosts:   TArray<FIntraClusterCost>  // cost from this entry point to every other
 }
 
-IntraClusterCost {
-  toEntryPointIndex:  int     // index into the same ClusterBoundary's entryPoints array,
-                               // or cross-referenced by global id; implementation detail
-  unitTypeId:         string
-  cost:               float   // local A* cost within the cluster between the two points
+FIntraClusterCost {
+  ToEntryPointIndex:  int32     // index into same FClusterBoundary's EntryPoints array
+  UnitTypeId:         FName
+  Cost:               float     // local A* cost within the cluster between the two points
 }
 ```
 
@@ -381,12 +367,12 @@ dirty clusters are re-queued. Unaffected units keep their paths.
 ### 12.6 Path Request Queue
 
 ```
-PathRequest {
-  unitActorId:   string
-  destination:   TileCoord
-  priority:      int          // higher = processed sooner this tick; caller-assigned
-                              // Suggested convention: player_command=100, task=50, background=10
-  requestedAt:   float        // world clock time; secondary sort key when priority is equal
+FPathRequest {
+  UnitActorId:   FName
+  Destination:   FIntPoint    // tile coord
+  Priority:      int32        // higher = processed sooner; caller-assigned
+                               // Convention: player_command=100, task=50, background=10
+  RequestedAt:   float        // world clock time; secondary sort key when priority is equal
 }
 ```
 

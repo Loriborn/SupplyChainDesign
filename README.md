@@ -2,21 +2,26 @@
 
 ## Purpose
 
-This document defines the game-data structures for **Bastion**, an engine-agnostic RTS
-sub-system framework for designing and building real-time strategy games with complex supply
-chains, unit systems, tile-based worlds, and event-driven simulation. It covers the full
-data model: world representation, entity definitions, simulation state, pathfinding,
-combat, resources, technologies, and events.
+This document defines the game-data structures for **Bastion**, an RTS sub-system framework
+for designing and building real-time strategy games with complex supply chains, unit systems,
+tile-based worlds, and event-driven simulation. It covers the full data model: world
+representation, entity definitions, simulation state, pathfinding, combat, resources,
+technologies, and events.
 
-Bastion targets **Unreal Engine 5** as its primary runtime, with implementation guidance
-provided in UE terms throughout. However, the data model itself is engine-agnostic — the
-same structures drive the **editor toolset**, which is designed for rapid prototyping and
-design iteration independently of the target engine. The editor may run as a standalone
-web or desktop application. Engine-specific implementation notes are clearly marked where
-they appear.
+Bastion is implemented in **C++ and Blueprints for Unreal Engine 5.5** (primary target), with
+UE 5.7 as a forward-compatibility target depending on stability. All data structures and
+runtime logic are expressed exclusively in UE-native terms. There is no engine-agnostic
+abstraction layer and no Python or external demo — implementation is entirely in-engine in
+C++ and Blueprints.
 
-This document is concerned exclusively with data structures and simulation logic. Editor
-systems (window management, UI, rendering) and engine integration layers are out of scope.
+> **Critical UE constraints:** Units do **not** use `APawn`, `ACharacter`, or the built-in
+> `UNavigationSystem` / NavMesh. All movement and pathfinding is custom HPA\* (§12). Units
+> are data entries managed by `AUnitManagerActor`, not individual world actors. Buildings and
+> World Objects use `AActor`. Built-in UE pawns, character movement, and navigation are
+> explicitly excluded from this system.
+
+This document is concerned exclusively with data structures and simulation logic. UI,
+rendering, and engine integration layers are out of scope.
 
 ---
 
@@ -35,9 +40,8 @@ The full data model is split across four domain documents:
 
 ## Terminology & Platform Conventions
 
-Bastion uses Unreal Engine 5 terminology as its baseline naming convention. Where the
-editor or a non-UE runtime is the context, the same terms apply structurally — the UE
-class basis column is informational, not prescriptive.
+Bastion uses Unreal Engine 5 terminology throughout. All class bases are prescriptive — this
+is a UE 5.5/5.7 C++ and Blueprints implementation.
 
 | Concept | UE Class Basis | Term Used Here |
 |---|---|---|
@@ -45,30 +49,55 @@ class basis column is informational, not prescriptive.
 | A mobile unit (worker or combat) | See note below | **Unit** |
 | A placed structure | `AActor` | **Building** |
 | A world-placed resource or item | `AActor` | **World Object** |
-| A pure data / value container | `USTRUCT` | **Struct** |
-| A design-mode blueprint / data asset | `UDataAsset` | **Definition** |
+| A pure data / value container | `USTRUCT(BlueprintType)` | **Struct** |
+| A design-mode data asset | `UPrimaryDataAsset` | **Definition** |
 | A runtime instance of a Definition | `AActor` instance | **Instance** / **Actor** |
 
-`UObject` is avoided as a raw base for any replicated gameplay class in UE. In the editor
-and non-UE contexts, Definitions are plain serializable data objects (JSON, binary, etc.).
+`UObject` is avoided as a raw base for any replicated gameplay class.
 
 **Shared base — composable interfaces:** Units, Buildings, and World Objects share
-capabilities through a set of composable interfaces rather than a shared base class.
+capabilities through a set of composable `UInterface` types rather than a shared base class.
 Each entity type implements only the interfaces relevant to its role. See §0 for the
 full interface definitions and implementation summary.
 
-**Unit implementation (UE):** All units use a **Manager Actor + `FFastArraySerializer`**
-pattern (`AUnitManagerActor` owning a replicated `TArray<FUnitState>`). Individual `AActor`
-per unit was rejected because RTS zoom-out capability eliminates distance-based relevancy,
-collapsing worst-case channel count to ~10,400 (2,600 units × 4 clients) and making
-replication manager CPU cost the binding constraint. `FFastArraySerializer` collapses this
-to 4 channels. Rendering uses **AnimToTexture + HISMCs**. Position is full `float` X/Y.
-Units may overlap; path wobble via deterministic lateral bias (seeded from unit ID) provides
-visual variation.
+**Unit implementation:** All units use a **Manager Actor + `FFastArraySerializer`** pattern
+(`AUnitManagerActor` owning a replicated `TArray<FUnitState>`). Individual `AActor` per unit
+was rejected because RTS zoom-out capability eliminates distance-based relevancy, collapsing
+worst-case channel count to ~10,400 (2,600 units × 4 clients) and making replication manager
+CPU cost the binding constraint. `FFastArraySerializer` collapses this to 4 channels.
+Rendering uses **AnimToTexture + HISMCs**. Position is full `float` X/Y. Units may overlap;
+path wobble via deterministic lateral bias (seeded from unit ID) provides visual variation.
 
-**Unit implementation (Editor / Python):** The manager pattern is approximated by a single
-authoritative simulation loop owning all unit state as a plain list. No replication layer
-exists in the editor — it runs singleplayer only.
+**Units do not use APawn, ACharacter, or UNavigationSystem.** Units are entries in
+`AUnitManagerActor`'s replicated state array. The built-in UE character movement component
+and NavMesh are not used anywhere in this system.
+
+---
+
+## UE Type Conventions
+
+All struct and field definitions use the following UE-native type notation:
+
+| Doc Type | UE / C++ Type | Notes |
+|---|---|---|
+| `FName` | `FName` | All IDs, tag labels, slot IDs, reference keys. `NAME_None` = absent/null. |
+| `FString` | `FString` | Display names, descriptions, UI labels, log messages. |
+| `int32` | `int32` | Integer values. |
+| `float` | `float` | Floating-point values. |
+| `bool` | `bool` | Boolean values. |
+| `TArray<T>` | `TArray<T>` | Dynamic array. |
+| `TMap<K,V>` | `TMap<K,V>` | Hash map. |
+| `FVector2D` | `FVector2D` | 2D float coordinate (world / unit position). |
+| `FIntPoint` | `FIntPoint` | 2D integer coordinate (tile coord, cluster coord). |
+| `FLinearColor` | `FLinearColor` | RGBA color value. |
+| `TSoftObjectPtr<UTexture2D>` | `TSoftObjectPtr<UTexture2D>` | Lazy-loaded icon/texture asset reference. |
+| `TOptional<FName>` | `TOptional<FName>` | Nullable ID (e.g. `occupantId`, `assignedBuildingId`). |
+
+**Enums** are shown as string literals (e.g. `"idle" | "pathing"`) in code blocks for
+readability. In C++ they are `UENUM(BlueprintType)` with `uint8` underlying type.
+
+**Structs** are `USTRUCT(BlueprintType)`. **Interfaces** are pure virtual `UInterface`
+types. **Definitions** inherit from `UPrimaryDataAsset`.
 
 ---
 
@@ -79,9 +108,8 @@ entity type implements only the interfaces relevant to its role. This avoids for
 capabilities onto entities that don't need them — a dropped resource world object has no
 need for equipment slots; a cosmetic building prop may not need a modifier stack.
 
-The interfaces are structural contracts, not class hierarchies. In UE they are implemented
-as pure virtual `UInterface` types. In the editor and Python demo they are duck-typed
-struct conventions.
+The interfaces are structural contracts, not class hierarchies. Implemented as pure virtual
+`UInterface` types in C++.
 
 ---
 
@@ -206,21 +234,21 @@ in Simulation Mode is defined there — it is only placed and observed.
 
 | Field | Type | Description |
 |---|---|---|
-| `id` | `string` | Unique identifier |
-| `name` | `string` | Display name |
-| `icon` | `asset ref` | Visual representation |
+| `id` | `FName` | Unique identifier |
+| `name` | `FString` | Display name |
+| `icon` | `TSoftObjectPtr<UTexture2D>` | Visual representation |
 | `passable` | `bool` | Whether Units can traverse this tile at all (universal) |
 | `movementCostDefault` | `float` | Fallback pathing weight for unlisted unit types (1.0 = normal) |
-| `movementCosts` | `MovementCostEntry[]` | Per-unit-type cost overrides |
+| `movementCosts` | `TArray<FMovementCostEntry>` | Per-unit-type cost overrides |
 | `allowedForBuilding` | `bool` | Default permission for building placement |
-| `tags` | `string[]` | Classification labels used by placement rule scripts |
+| `tags` | `TArray<FName>` | Classification labels used by placement rule scripts |
 
 #### MovementCostEntry Struct
 
 ```
-MovementCostEntry {
-  unitTypeId:  string
-  cost:        float
+FMovementCostEntry {
+  UnitTypeId:  FName
+  Cost:        float
 }
 ```
 
@@ -229,25 +257,20 @@ MovementCostEntry {
 2. Fall back to tile's `movementCostDefault`.
 3. Fall back to universal default `1.0`.
 
-#### TileCoord Struct
+#### TileCoord
 
-```
-TileCoord {
-  x:  int
-  y:  int
-}
-```
+Tile coordinates use `FIntPoint` (`X`, `Y`).
 
 ### 1.2 Tile Instance Struct (World State)
 
 | Field | Type | Description |
 |---|---|---|
-| `tileDefId` | `string` | Reference to Tile Definition |
-| `elevation` | `float` | Absolute elevation of this cell |
-| `occupantId` | `string \| null` | Building Actor occupying this cell, if any |
-| `zoneId` | `string \| null` | Zone this cell belongs to, if any |
+| `tileDefId` | `FName` | Reference to Tile Definition |
+| `elevation` | `int32` | Elevation in height units above base datum (0 = water level). Multiply by `World.heightScalar` for world-unit height. |
+| `occupantId` | `TOptional<FName>` | Building Actor occupying this cell; unset = no occupant. Units never set this. |
+| `zoneId` | `TOptional<FName>` | Zone this cell belongs to; unset = unclaimed. |
 
-Stored as flat array indexed by `y * mapWidth + x`.
+Stored as flat `TArray<FTileInstance>` indexed by `Y * MapWidth + X`.
 
 ### 1.3 Elevation & Pathfinding
 
@@ -273,12 +296,13 @@ Elevation also contributes an additive cost to passable edges, scaled by
 
 | Field | Type | Description |
 |---|---|---|
-| `mapWidth` | `int` | Map width in tiles |
-| `mapHeight` | `int` | Map height in tiles |
-| `tileSize` | `float` | Physical size of one tile in world units (UE: cm) |
-| `clusterSize` | `int` | Tiles per cluster edge for hierarchical pathfinding |
-| `elevationCostFactor` | `float` | Scalar applied to elevation delta in edge cost formula. `0.0` = elevation costless but still blocks. `1.0` = 1 unit elevation = 1.0 added to edge cost. Default: `1.0` |
-| `pathBudgetPerTick` | `int` | Maximum path requests processed per simulation tick. Recommended range: 50–200 depending on map size and expected unit density. Prevents burst spikes on group move orders. |
+| `mapWidth` | `int32` | Map width in tiles |
+| `mapHeight` | `int32` | Map height in tiles |
+| `tileSize` | `float` | Physical size of one tile in world units (cm in UE) |
+| `clusterSize` | `int32` | Tiles per cluster edge for hierarchical pathfinding |
+| `heightScalar` | `float` | World-unit height per elevation integer unit. Multiply `TileInstance.elevation` by this to get world-unit height (cm). Default: `100.0`. |
+| `elevationCostFactor` | `float` | Scalar applied to elevation delta in edge cost formula. `0.0` = elevation costless but still blocks. `1.0` = 1 elevation unit = 1.0 added to edge cost. Default: `1.0` |
+| `pathBudgetPerTick` | `int32` | Maximum path requests processed per simulation tick. Recommended range: 50–200 depending on map size and expected unit density. Prevents burst spikes on group move orders. |
 
 ---
 
@@ -288,26 +312,26 @@ Elevation also contributes an additive cost to passable edges, scaled by
 
 | Field | Type | Description |
 |---|---|---|
-| `id` | `string` | Unique identifier |
-| `name` | `string` | Display name |
-| `color` | `color` | Map overlay color |
-| `startingOwnerId` | `string \| null` | Owning player or faction at world start |
+| `id` | `FName` | Unique identifier |
+| `name` | `FString` | Display name |
+| `color` | `FLinearColor` | Map overlay color |
+| `startingOwnerId` | `TOptional<FName>` | Owning player or faction at world start; unset = unclaimed |
 
 ### 2.2 Zone Instance (World State)
 
 | Field | Type | Description |
 |---|---|---|
-| `zoneDefId` | `string` | Reference to Zone Definition |
-| `currentOwnerId` | `string \| null` | Current owner; `null` = unclaimed |
-| `scopedInventory` | `ScopedInventorySlot[]` | Zone-level abstract resource quantities |
+| `zoneDefId` | `FName` | Reference to Zone Definition |
+| `currentOwnerId` | `TOptional<FName>` | Current owner; unset = unclaimed |
+| `scopedInventory` | `TArray<FScopedInventorySlot>` | Zone-level abstract resource quantities |
 
 ### 2.3 Zone-Scoped Resources
 
 ```
-ScopedInventorySlot {
-  resourceDefId:  string
-  quantity:       float
-  capacity:       float     // -1 = uncapped
+FScopedInventorySlot {
+  ResourceDefId:  FName
+  Quantity:       float
+  Capacity:       float     // -1.0f = uncapped
 }
 ```
 
@@ -322,14 +346,14 @@ Resources with `abstract: true` and `storageScope: "zone"` accumulate here.
 ### 2.5 Zone Objectives
 
 ```
-ZoneObjective {
-  id:              string
-  zoneId:          string
-  description:     string
-  resourceDefId:   string
-  targetQuantity:  float
-  scope:           "available_inventory" | "scoped_inventory" | "either"
-  completionEvent: GameEventRef
+FZoneObjective {
+  Id:              FName
+  ZoneId:          FName
+  Description:     FString
+  ResourceDefId:   FName
+  TargetQuantity:  float
+  Scope:           "available_inventory" | "scoped_inventory" | "either"  // UENUM
+  CompletionEvent: FName    // GameEventRef — id of an EventDefinition
 }
 ```
 
@@ -351,23 +375,23 @@ Objects, and optionally equipped into equipment slots on units and buildings.
 
 | Field | Type | Description |
 |---|---|---|
-| `id` | `string` | Unique identifier |
-| `name` | `string` | Display name |
-| `icon` | `asset ref` | Visual representation |
-| `unit` | `string` | Unit label (e.g. "kg", "units", "happiness") |
+| `id` | `FName` | Unique identifier |
+| `name` | `FString` | Display name |
+| `icon` | `TSoftObjectPtr<UTexture2D>` | Visual representation |
+| `unit` | `FString` | Unit label (e.g. "kg", "units", "happiness") |
 | `abstract` | `bool` | If true, abstract resource; not carried or stored in inventory |
-| `storageScope` | `"player" \| "zone" \| "building_tag"` | **Abstract only** |
-| `storageBuildingTag` | `string?` | **Abstract, `building_tag` scope only** |
-| `stackSize` | `int` | **Physical only.** Max quantity per inventory slot |
-| `tags` | `string[]` | Classification labels |
-| `worldObjectBehavior` | `WorldObjectBehavior \| null` | Defines behavior when this resource exists as a dropped world entity; `null` = cannot be dropped. See §16 |
+| `storageScope` | `"player" \| "zone" \| "building_tag"` | **Abstract only** (UENUM) |
+| `storageBuildingTag` | `FName` | **Abstract, `building_tag` scope only.** `NAME_None` if unused. |
+| `stackSize` | `int32` | **Physical only.** Max quantity per inventory slot |
+| `tags` | `TArray<FName>` | Classification labels |
+| `worldObjectBehavior` | `TOptional<FWorldObjectBehavior>` | Defines behavior when dropped as a world entity; unset = cannot be dropped. See §16 |
 | `equippable` | `bool` | Whether this resource can be placed into an equipment slot |
-| `fitsSlotTypes` | `string[]` | **Equippable only.** Slot type strings this resource fits into |
-| `unitTypeConstraints` | `string[]` | **Equippable only.** If non-empty, only unit types with a matching id may equip this resource |
-| `tagConstraints` | `string[]` | **Equippable only.** The equipping entity must possess all listed tags (definition tags + modifier-granted tags) |
-| `removable` | `bool` | **Equippable only.** Default `true`. If `false`, once equipped this resource cannot be removed. Used for building upgrades placed via tasks or events. |
-| `modifiers` | `ModifierTemplate[]` | **Equippable only.** Modifiers applied to the equipping entity while this resource is equipped. Task enable/disable is expressed within each `ModifierTemplate`. See §13 |
-| `exclusiveCarry` | `bool` | If `true`, a unit carrying this resource cannot simultaneously carry other resources |
+| `fitsSlotTypes` | `TArray<FName>` | **Equippable only.** Slot type names this resource fits into |
+| `unitTypeConstraints` | `TArray<FName>` | **Equippable only.** If non-empty, only unit types with a matching id may equip this resource |
+| `tagConstraints` | `TArray<FName>` | **Equippable only.** The equipping entity must possess all listed tags |
+| `removable` | `bool` | **Equippable only.** Default `true`. If `false`, once equipped cannot be removed. Used for building upgrades. |
+| `modifiers` | `TArray<FModifierTemplate>` | **Equippable only.** Modifiers applied while this resource is equipped. See §13 |
+| `exclusiveCarry` | `bool` | If `true`, a unit carrying this resource cannot carry other resources simultaneously |
 
 ### 3.3 Abstract Storage
 
@@ -379,19 +403,18 @@ Objects, and optionally equipped into equipment slots on units and buildings.
 
 **Silent discard:** If a step produces an abstract resource and no valid storage actor is
 resolved (e.g. the designated building was demolished), the quantity is silently discarded.
-No error is raised.
 
-> **Designer guidance:** Abstract resources should target storage that is permanent for the
-> session. `"player"` and `"zone"` scopes are always resolvable. A `"building_tag"` storage
-> building should be treated as indestructible.
+> **Designer guidance:** Abstract resources should target permanent storage. `"player"` and
+> `"zone"` scopes are always resolvable. A `"building_tag"` storage building should be treated
+> as indestructible.
 
 ### 3.4 Resource Instances
 
-A physical resource instance is `{ resourceDefId, quantity }` held in an `InventorySlot` on a
-Building Actor, Unit Actor, or World Object Actor. Abstract resource instances are held in
-`AbstractInventorySlot` on Zone Instances or Player State Actors. Every quantity has a
-defined owning actor at all times. When a unit carrying resources dies, those resources are
-discarded by default. See §16.5 for the drop-on-death extension.
+A physical resource instance is `{ FName ResourceDefId, int32 Quantity }` held in an
+`FInventorySlot` on a Building Actor, Unit Actor, or World Object Actor. Abstract resource
+instances are held in `FAbstractInventorySlot` on Zone Instances or Player State Actors.
+Every quantity has a defined owning actor at all times. When a unit dies, carried resources
+are discarded by default. See §16.5 for drop-on-death.
 
 ---
 
@@ -405,11 +428,11 @@ entity's active modifier stack (§13).
 
 | Field | Type | Description |
 |---|---|---|
-| `id` | `string` | Unique identifier |
-| `name` | `string` | Display name |
-| `icon` | `asset ref` | Visual / map representation |
-| `footprint` | `bool[][]` | Binary occupancy grid; see §4.1.1 |
-| `tags` | `string[]` | Arbitrary classification labels |
+| `id` | `FName` | Unique identifier |
+| `name` | `FString` | Display name |
+| `icon` | `TSoftObjectPtr<UTexture2D>` | Visual / map representation |
+| `footprint` | `TArray<TArray<bool>>` | Binary occupancy grid; see §4.1.1 |
+| `tags` | `TArray<FName>` | Arbitrary classification labels |
 
 #### 4.1.1 Footprint Grid
 
@@ -447,9 +470,9 @@ Buildings declare their base attribute values here. Core attributes present on a
 are defined in §13.1. Additional designer-defined custom attributes may be declared here.
 
 ```
-AttributeDeclaration {
-  attributeId:  string    // "maxHealth", "armour", or a custom attribute id
-  baseValue:    float
+FAttributeDeclaration {
+  AttributeId:  FName     // "maxHealth", "armour", or a custom attribute id
+  BaseValue:    float
 }
 ```
 
@@ -536,10 +559,10 @@ always enforced and cannot be overridden by script.
 ### 4.5 Access Points
 
 ```
-AccessPoint {
-  id:      string
-  offset:  { x: int, y: int }
-  tags:    string[]
+FAccessPoint {
+  Id:      FName
+  Offset:  FIntPoint    // tile offset from building origin
+  Tags:    TArray<FName>
 }
 ```
 
@@ -548,10 +571,10 @@ Units path to the nearest reachable Access Point. If none declared, any adjacent
 ### 4.6 Inventory Declarations
 
 ```
-InventorySlotDeclaration {
-  resourceDefId:  string
-  capacity:       int
-  namespace:      "local" | "available"
+FInventorySlotDeclaration {
+  ResourceDefId:  FName
+  Capacity:       int32
+  Namespace:      "local" | "available"    // UENUM
 }
 ```
 
@@ -563,11 +586,11 @@ InventorySlotDeclaration {
 ### 4.7 Unit Roster
 
 ```
-UnitRosterEntry {
-  unitTypeId:  string
-  minCount:    int     // building enters "blocked" if this is not met
-  maxCount:    int     // maximum simultaneously assigned units of this type
-  derived:     bool    // true if sourced from a task step requirement
+FUnitRosterEntry {
+  UnitTypeId:  FName
+  MinCount:    int32    // building enters "blocked" if not met
+  MaxCount:    int32    // maximum simultaneously assigned units of this type
+  bDerived:    bool     // true if sourced from a task step requirement
 }
 ```
 
@@ -577,17 +600,16 @@ Buildings declare named equipment slots. Equippable resources are placed into th
 via task steps or event actions, applying their modifiers to the building.
 
 ```
-EquipmentSlotDeclaration {
-  slotId:              string    // unique within this building e.g. "millstone", "furnace"
-  slotType:            string    // type string matched against resource fitsSlotTypes
-  label:               string    // display name shown in UI
+FEquipmentSlotDeclaration {
+  SlotId:    FName      // unique within this building e.g. "millstone", "furnace"
+  SlotType:  FName      // matched against resource fitsSlotTypes
+  Label:     FString    // display name shown in UI
 }
 ```
 
 Equipment slots on buildings represent structural improvements. By convention, building
-equipment should use resources with `removable: false` to represent permanent upgrades
-(a better millstone, a reinforced furnace). Designer-authored event actions or task steps
-may place equipment into building slots. See §14.
+equipment should use resources with `removable: false` to represent permanent upgrades.
+See §14.
 
 ---
 
@@ -596,62 +618,72 @@ may place equipment into building slots. See §14.
 ### 5.1 Work Task Definition
 
 ```
-WorkTaskDefinition {
-  id:           string
-  name:         string
-  trigger:      "loop" | "event"
-  eventRef:     GameEventRef?
-  concurrency:  TaskConcurrencyRules
-  steps:        WorkStepDefinition[]
-  enabled:      bool
+FWorkTaskDefinition {
+  Id:           FName
+  Name:         FString
+  Trigger:      "loop" | "event"    // UENUM
+  EventRef:     FName               // GameEventRef — id of EventDefinition; NAME_None if unused
+  Concurrency:  FTaskConcurrencyRules
+  Steps:        TArray<FWorkStepDefinition>
+  bEnabled:     bool
 }
 ```
 
 ### 5.2 Concurrency Rules
 
 ```
-TaskConcurrencyRules {
-  selfConcurrency:  "none" | "unlimited" | int
-  crossTaskMode:    "exclusive" | "open" | "whitelist" | "blacklist"
-  crossTaskRefs:    string[]
+FTaskConcurrencyRules {
+  SelfConcurrency:  "none" | "unlimited" | int32    // UENUM + optional count
+  CrossTaskMode:    "exclusive" | "open" | "script"  // UENUM
+  CrossTaskScript:  FString?    // evaluated when CrossTaskMode = "script";
+                                // receives thisTask, candidateTask → returns bool
 }
 ```
 
-- Conflict resolution: the more restrictive rule always wins, checked in both directions.
-- Blocked tasks persist in `"blocked_concurrency"` until a concurrency recalculation dispatch runs.
-- Self-concurrency is always capped by `UnitRosterEntry.maxCount` for the relevant unit type.
+- `"exclusive"` — cannot run alongside any other task. Construction tasks use this.
+- `"open"` — no restriction; may run alongside any other task.
+- `"script"` — a Blueprint-callable expression determines compatibility.
+- Conflict resolution: the more restrictive result wins, checked in both directions.
+- Blocked tasks persist in `"blocked_concurrency"` until a concurrency recalculation dispatch.
 
 ### 5.3 Work Step Definition
 
 ```
-WorkStepDefinition {
-  id:            string
-  type:          WorkStepType
-  duration:      float              // seconds; 0 = instantaneous
-  unitTypeId:    string?            // step blocks until a unit of this type is present
-  tagRequirements: string[]         // the present unit must have ALL of these tags
-                                    // (checks definition tags + modifier-granted tags)
-  preconditions: StepPrecondition[]
-  vars:          StepVars
+FWorkStepDefinition {
+  Id:                 FName
+  Type:               WorkStepType              // UENUM
+  Duration:           float                     // seconds; 0 = instantaneous
+  WorkerRequirements: TArray<FWorkerRequirement> // all must be simultaneously present
+  Preconditions:      TArray<FStepPrecondition>
+  Vars:               FStepVars
+}
+
+FWorkerRequirement {
+  UnitTypeId:       FName
+  Count:            int32          // number of units of this type required (≥ 1)
+  TagRequirements:  TArray<FName>  // present units must have ALL these tags
+  AccessPointTags:  TArray<FName>  // unit must path to access point bearing ALL these tags
+  Role:             "required" | "bonus"    // UENUM
+  BonusEffect:      TOptional<FBonusWorkerEffect>
 }
 ```
 
-`tagRequirements` enables task steps that require equipped items — e.g. a jousting step
-requiring `"ROYALTY"` which may be granted by a MEDAL resource in a NECK slot.
+`TagRequirements` enables steps requiring equipped items — e.g. a jousting step requiring
+`"ROYALTY"` which may be granted by a MEDAL resource in a NECK slot.
 
 ### 5.4 Step Preconditions
 
 ```
-StepPrecondition {
-  type:             "inventory_min" | "inventory_max" | "building_state" |
-                    "zone_owned" | "event_flag" | "entity_has_tag"
-  resourceDefId:    string?
-  namespace:        "local" | "available"?
-  quantity:         int?
-  targetBuildingId: string?
-  requiredState:    string?
-  flagId:           string?
-  tag:              string?     // for entity_has_tag type
+FStepPrecondition {
+  Type:             "inventory_min" | "inventory_max" | "building_state" |
+                    "zone_owned" | "event_flag" | "entity_has_tag"    // UENUM
+  ResourceDefId:    FName
+  Namespace:        "local" | "available"    // UENUM; NAME_None if unused
+  Quantity:         int32
+  TargetBuildingId: FName     // NAME_None if unused
+  RequiredState:    FName     // NAME_None if unused
+  FlagId:           FName     // NAME_None if unused
+  Tag:              FName     // for entity_has_tag type
 }
 ```
 
@@ -682,18 +714,17 @@ StepPrecondition {
 ### 5.6 Simulation-Level Task Controls
 
 ```
-TaskInstanceControl {
-  taskDefId:       string
-  enabled:         bool
-  priority:        "high" | "medium" | "low"
-  executionMode:   "forever" | "once" | "count"
-  executionCount:  int?
-  state:           "idle" | "running" | "blocked_concurrency" |
-                   "waiting_on_precondition" | "waiting_on_unit" | "complete"
-  progress: {
-    currentStepIndex:  int
-    stepElapsed:       float
-  }
+FTaskInstanceControl {
+  TaskDefId:        FName
+  bEnabled:         bool
+  Priority:         "high" | "medium" | "low"    // UENUM
+  ExecutionMode:    "forever" | "once" | "count"  // UENUM
+  ExecutionCount:   int32     // required when ExecutionMode = "count"
+  CompleteBehavior: "terminal" | "reset"          // UENUM
+  State:            "idle" | "running" | "blocked_concurrency" |
+                    "waiting_on_precondition" | "waiting_on_unit" | "complete"    // UENUM
+  CurrentStepIndex: int32
+  StepElapsed:      float
 }
 ```
 
@@ -707,19 +738,19 @@ Workers and combat units are the same type. Role is expressed entirely through f
 
 | Field | Type | Description |
 |---|---|---|
-| `id` | `string` | Unique identifier |
-| `name` | `string` | Display name |
-| `icon` | `asset ref` | Visual representation |
-| `tags` | `string[]` | Classification labels (e.g. `"military"`, `"civilian"`, `"mounted"`) |
+| `id` | `FName` | Unique identifier |
+| `name` | `FString` | Display name |
+| `icon` | `TSoftObjectPtr<UTexture2D>` | Visual representation |
+| `tags` | `TArray<FName>` | Classification labels (e.g. `"military"`, `"civilian"`, `"mounted"`) |
 | `heightDeltaLimitDefault` | `float` | Max elevation change this unit type can traverse per tile edge when no per-tile-type override is defined |
-| `heightDeltaLimits` | `HeightDeltaEntry[]` | Per-tile-type override table; mirrors the `movementCosts` pattern |
+| `heightDeltaLimits` | `TArray<FHeightDeltaEntry>` | Per-tile-type override table; mirrors the `movementCosts` pattern |
 
 #### HeightDeltaEntry Struct
 
 ```
-HeightDeltaEntry {
-  tileDefId:  string    // reference to a Tile Definition
-  limit:      float     // max elevation delta this unit type can traverse entering that tile type
+FHeightDeltaEntry {
+  TileDefId:  FName     // reference to a Tile Definition
+  Limit:      float     // max elevation delta this unit type can traverse entering that tile type
 }
 ```
 
@@ -739,9 +770,9 @@ Unit Type Definitions declare base attribute values for all core unit attributes
 custom attributes. See §13.1 for the full core attribute set.
 
 ```
-AttributeDeclaration {
-  attributeId:  string
-  baseValue:    float
+FAttributeDeclaration {
+  AttributeId:  FName
+  BaseValue:    float
 }
 ```
 
@@ -764,39 +795,31 @@ the attribute system (§13).
 | `controllable` | `bool` | Player may issue direct move/attack commands |
 | `fightsBack` | `bool` | Retaliates when attacked |
 | `autoEngages` | `bool` | Automatically attacks nearby enemies without a command |
+| `targetSelectionPolicy` | `"nearest" \| "weakest" \| "strongest" \| "first"` | Controls target selection (UENUM) |
 
 ### 6.5 Inventory Slots
 
-A unit's carry capacity is defined by the **number of inventory slots** declared on its
-Unit Type Definition. Each slot is generic — it holds any one resource type up to that
-resource's `stackSize`. The slot count is the capacity; a farmer with 5 slots can carry
-5 distinct resource stacks simultaneously, a knight with 2 slots can carry 2.
+A unit's carry capacity is the **number of inventory slots** declared on its Unit Type
+Definition. Each slot is generic — holds any one resource type up to that resource's
+`stackSize`.
 
 ```
-UnitInventoryDeclaration {
-  slotCount:  int    // number of generic carry slots this unit type has
+FUnitInventoryDeclaration {
+  SlotCount:  int32    // number of generic carry slots this unit type has
 }
 ```
 
-Slots are not pre-bound to a resource type in the definition. At runtime each occupied slot
-holds `{ resourceDefId, quantity }`. A slot is empty until a resource is placed into it.
-
-If a carried resource has `exclusiveCarry: true`, it must occupy all slots on the unit —
-no other resource may be carried simultaneously while it is held.
-
-Carry capacity is not an attribute modifier target. Adding inventory slots via a modifier is
-not supported; slot count is fixed by the unit type definition. Designers who need variable
-carry capacity should design separate unit types.
+Slots are not pre-bound to a resource type. At runtime each occupied slot holds
+`{ FName ResourceDefId, int32 Quantity }`. Carry capacity is not a modifier target — slot
+count is fixed by definition.
 
 ### 6.6 Equipment Slot Declarations
 
-Units declare named equipment slots that equippable resources may be placed into.
-
 ```
-EquipmentSlotDeclaration {
-  slotId:    string    // unique within this unit type e.g. "head", "body", "neck", "weapon"
-  slotType:  string    // type string matched against resource fitsSlotTypes
-  label:     string
+FEquipmentSlotDeclaration {
+  SlotId:    FName      // unique within this unit type e.g. "head", "body", "neck", "weapon"
+  SlotType:  FName      // matched against resource fitsSlotTypes
+  Label:     FString
 }
 ```
 
@@ -828,66 +851,60 @@ configures the definition, not in any structural difference in the data model.
 
 | Field | Type | Description |
 |---|---|---|
-| `mapWidth` | `int` | Map width in tiles |
-| `mapHeight` | `int` | Map height in tiles |
-| `tileSize` | `float` | World-unit size of one tile (UE: cm) |
-| `clusterSize` | `int` | Tiles per cluster edge |
+| `mapWidth` | `int32` | Map width in tiles |
+| `mapHeight` | `int32` | Map height in tiles |
+| `tileSize` | `float` | World-unit size of one tile (cm) |
+| `clusterSize` | `int32` | Tiles per cluster edge |
+| `heightScalar` | `float` | See §1.4 |
 | `elevationCostFactor` | `float` | See §1.4 |
-| `pathBudgetPerTick` | `int` | See §1.4 |
-| `tiles` | `TileInstance[]` | Flat array; index = `y * mapWidth + x` |
-| `clusterGraph` | `ClusterGraph` | Hierarchical pathfinding graph; see §12 |
-| `pathRequestQueue` | `PathRequest[]` | Pending pathfinding requests |
-| `zones` | `ZoneInstance[]` | All zone instances |
-| `buildingActors` | `BuildingActor[]` | All placed buildings |
-| `unitActors` | `UnitActor[]` | All active units (managed by `AUnitManagerActor`) |
-| `worldObjectActors` | `WorldObjectActor[]` | All active world objects (dropped items, relics, etc.) |
-| `playerStateActors` | `PlayerStateActor[]` | One per player; holds player-scoped abstract resources |
-| `activeTechs` | `ActiveTech[]` | Technologies currently in effect; see §15 |
+| `pathBudgetPerTick` | `int32` | See §1.4 |
+| `tiles` | `TArray<FTileInstance>` | Flat array; index = `Y * MapWidth + X` |
+| `clusterGraph` | `FClusterGraph` | Hierarchical pathfinding graph; see §12 |
+| `pathRequestQueue` | `TArray<FPathRequest>` | Pending pathfinding requests |
+| `zones` | `TArray<FZoneInstance>` | All zone instances |
+| `buildingActors` | `TArray<ABuildingActor*>` | All placed buildings |
+| `unitActors` | `TArray<FUnitState>` | All active units (owned by `AUnitManagerActor`) |
+| `worldObjectActors` | `TArray<AWorldObjectActor*>` | All active world objects |
+| `playerStateActors` | `TArray<FPlayerStateData>` | One per player; player-scoped abstract resources |
+| `activeTechs` | `TArray<FActiveTech>` | Technologies currently in effect; see §15 |
 | `clock` | `float` | Simulation time elapsed in seconds |
-| `eventQueue` | `GameEvent[]` | Pending events |
-| `eventFlags` | `Map<string, bool>` | Named boolean flags |
-| `objectives` | `ZoneObjective[]` | Active objectives |
+| `eventQueue` | `TArray<FGameEvent>` | Pending events |
+| `eventFlags` | `TMap<FName, bool>` | Named boolean flags |
+| `objectives` | `TArray<FZoneObjective>` | Active objectives |
 
-**Time model:** Delta time per frame (UE: `DeltaSeconds`), framerate-agnostic. Speed multiplier
-applied as scalar on delta time. Python demo uses fixed delta time per loop iteration.
+**Time model:** Delta time per frame (`DeltaSeconds`), framerate-agnostic. Speed multiplier
+applied as scalar on delta time.
 
 ### 7.1 Supporting Structs
 
-**`ResourceCost`** — a quantity of a specific resource required or consumed by a system
+**`FResourceCost`** — a quantity of a specific resource required or consumed by a system
 operation (construction cost, tech cost, etc.):
 
 ```
-ResourceCost {
-  resourceDefId:  string
-  quantity:       int
+FResourceCost {
+  ResourceDefId:  FName
+  Quantity:       int32
 }
 ```
 
-**`GameEventRef`** — a string reference to a named `EventDefinition` id. Used wherever a
-system hook needs to fire a designer-authored event (task triggers, zone objectives, upgrade
-triggers, tech effects, world object scripts):
-
-```
-GameEventRef = string    // the id of an EventDefinition
-```
+**`GameEventRef`** — an `FName` referencing a named `EventDefinition` id. Used wherever a
+system hook needs to fire a designer-authored event. `NAME_None` = no event.
 
 ### 7.2 Player State Actor
 
 The **Player State Actor** is a non-spatial, per-player data container that accumulates
-abstract resources scoped to a player globally (i.e. not zone- or building-specific).
-It has no tile footprint and is not placed on the map. One instance exists per player
-for the lifetime of the simulation session.
+abstract resources scoped to a player globally (not zone- or building-specific). It has no
+tile footprint. One instance exists per player for the simulation session.
 
 ```
-PlayerStateActor {
-  playerId:          string
-  abstractInventory: AbstractInventorySlot[]
+FPlayerStateData {
+  PlayerId:          FName
+  AbstractInventory: TArray<FAbstractInventorySlot>
 }
 ```
 
-Abstract resources with `storageScope: "player"` read from and write to this actor.
-Examples include global prestige, total accumulated faith, or dynasty-wide honour — values
-that belong to the player rather than any specific zone or building.
+Abstract resources with `storageScope: "player"` read from and write to this data.
+Examples: global prestige, total accumulated faith, dynasty-wide honour.
 
 ---
 
@@ -897,49 +914,46 @@ that belong to the player rather than any specific zone or building.
 `IInventoryHolder` (see §0). Fields from these interfaces are not repeated inline below.
 
 ```
-BuildingActor {
-  // IDamageable:     currentHealth
-  // IAttributeHolder: attributes
-  // IModifiable:     modifierStack
-  // IEquippable:     equipmentSlots
-  // IInventoryHolder: localInventory, availableInventory, abstractInventory
+// ABuildingActor — UE AActor; implements IDamageable, IAttributeHolder, IModifiable,
+//                 IEquippable, IInventoryHolder
+// (Interface fields not repeated inline)
 
-  id:                   string
-  defId:                string
-  ownerId:              string
-  originTile:           { x: int, y: int }          // top-left of bounding box in world tiles
-  rotation:             0 | 90 | 180 | 270
-  rotatedFootprint:     bool[][]                     // Definition footprint transformed by rotation
-  state:                "constructing" | "idle" | "working" | "blocked" | "disabled"
-  constructionControl:  TaskInstanceControl | null
-  localInventory:       InventorySlot[]
-  availableInventory:   InventorySlot[]
-  abstractInventory:    AbstractInventorySlot[]
-  taskControls:         TaskInstanceControl[]
-  assignedUnits:        AssignedUnit[]
+FBuildingRuntimeData {
+  Id:                   FName
+  DefId:                FName
+  OwnerId:              FName
+  OriginTile:           FIntPoint             // top-left of bounding box in world tiles
+  Rotation:             int32                 // 0, 90, 180, or 270
+  RotatedFootprint:     TArray<TArray<bool>>  // Definition footprint transformed by rotation
+  State:                "constructing" | "idle" | "working" | "blocked" | "disabled"  // UENUM
+  ConstructionControl:  TOptional<FTaskInstanceControl>
+  LocalInventory:       TArray<FInventorySlot>
+  AvailableInventory:   TArray<FInventorySlot>
+  AbstractInventory:    TArray<FAbstractInventorySlot>
+  TaskControls:         TArray<FTaskInstanceControl>
+  AssignedUnits:        TArray<FAssignedUnit>
 }
 
-InventorySlot {
-  resourceDefId:  string
-  quantity:       int
-  capacity:       int    // from InventorySlotDeclaration; not modified by attribute stack
+FInventorySlot {
+  ResourceDefId:  FName
+  Quantity:       int32
+  Capacity:       int32    // from InventorySlotDeclaration; not a modifier target
 }
 
-AbstractInventorySlot {
-  resourceDefId:  string
-  quantity:       float
-  capacity:       float
+FAbstractInventorySlot {
+  ResourceDefId:  FName
+  Quantity:       float
+  Capacity:       float    // -1.0f = uncapped
 }
 
-AssignedUnit {
-  unitTypeId:   string
-  unitActorId:  string
+FAssignedUnit {
+  UnitTypeId:   FName
+  UnitActorId:  FName
 }
 ```
 
-**Building inventory slots** are declared per resource type with explicit capacities (§4.6).
-Building slot capacity is fixed and is not an attribute modifier target — capacity changes
-are handled by replacing or upgrading the slot declaration via equipment (§14).
+**Building inventory slot capacity is fixed** per declaration and is not a modifier target —
+capacity changes are handled via equipment (§14).
 
 ---
 
@@ -949,43 +963,45 @@ are handled by replacing or upgrading the slot declaration via equipment (§14).
 `IInventoryHolder` (see §0). Fields from these interfaces are not repeated inline below.
 
 ```
-UnitActor {
-  // IDamageable:      currentHealth
-  // IAttributeHolder: attributes
-  // IModifiable:      modifierStack
-  // IEquippable:      equipmentSlots
-  // IInventoryHolder: inventory (CarrySlot[])
+// FUnitState — entry in AUnitManagerActor's FFastArraySerializer TArray
+// (IDamageable, IAttributeHolder, IModifiable, IEquippable, IInventoryHolder fields included)
 
-  id:                  string
-  unitTypeDefId:       string
-  ownerId:             string
-  assignedBuildingId:  string | null
-  position:            { x: float, y: float }
-  state:               "idle" | "pathing" | "working" | "waiting" | "returning" |
-                       "constructing" | "combat" | "dead"
-  currentPath: {
-    clusterPath:  ClusterCoord[]
-    localPath:    TileCoord[]
-  }
-  currentJob:          JobAssignment | null
-  inventory:           CarrySlot[]
+FUnitState {
+  Id:                  FName
+  UnitTypeDefId:       FName
+  OwnerId:             FName
+  AssignedBuildingId:  TOptional<FName>
+  Position:            FVector2D              // world-unit X/Y (no Z; elevation is tile data)
+  State:               "idle" | "pathing" | "working" | "waiting" | "returning" |
+                       "constructing" | "combat" | "dead"    // UENUM
+  ClusterPath:         TArray<FIntPoint>      // high-level cluster route
+  LocalPath:           TArray<FIntPoint>      // tile-level path within current cluster
+  CurrentJob:          TOptional<FJobAssignment>
+  Inventory:           TArray<FCarrySlot>
 
-  // Combat runtime state
-  attackTargetId:      string | null
-  attackCooldown:      float
+  // Interface data
+  CurrentHealth:       float
+  Attributes:          TArray<FAttributeDeclaration>
+  ModifierStack:       TArray<FModifier>
+  EquipmentSlots:      TArray<FEquipmentSlotInstance>
+
+  // Combat runtime
+  AttackTargetId:      TOptional<FName>
+  AttackCooldown:      float
+  GrantedAbilities:    TArray<FName>
 }
 
-CarrySlot {
-  resourceDefId:  string | null   // null = empty slot
-  quantity:       int
+FCarrySlot {
+  ResourceDefId:  FName     // NAME_None = empty slot
+  Quantity:       int32
 }
 
-JobAssignment {
-  taskDefId:           string
-  stepDefId:           string
-  targetBuildingId:    string | null
-  targetAccessPointId: string | null
-  stepProgress:        float
+FJobAssignment {
+  TaskDefId:           FName
+  StepDefId:           FName
+  TargetBuildingId:    TOptional<FName>
+  TargetAccessPointId: TOptional<FName>
+  StepProgress:        float
 }
 ```
 
@@ -1036,9 +1052,10 @@ producing consistent route variation per unit without runtime randomness or rese
 | `on_building_destroyed` | Building health reaches 0 | `buildingActorId`, `defId`, `ownerId`, `tileCoord` |
 | `on_construction_complete` | Building finishes constructing | `buildingActorId` |
 | `on_task_complete` | Task completes one full cycle | `buildingActorId`, `taskDefId` |
-| `on_resource_threshold` | Resource quantity crosses threshold | `buildingActorId \| zoneId`, `resourceDefId`, `quantity` |
+| `on_resource_threshold` | Resource quantity crosses a designer-configured threshold | `buildingActorId \| zoneId`, `resourceDefId`, `quantity`, `direction` |
 | `on_zone_ownership_change` | Zone changes owner | `zoneId`, `previousOwnerId`, `newOwnerId` |
 | `on_unit_assigned` | Unit assigned to building | `unitActorId`, `buildingActorId` |
+| `on_unit_spawned` | Unit created by a `SPAWN_UNIT` step | `unitActorId`, `unitTypeDefId`, `buildingActorId`, `position` |
 | `on_unit_damaged` | Unit takes damage | `unitActorId`, `damage`, `currentHealth`, `attackerId` |
 | `on_unit_death` | Unit health reaches 0 | `unitActorId`, `unitTypeDefId`, `ownerId`, `position`, `assignedBuildingId` |
 | `on_item_equipped` | Resource placed in equipment slot | `entityId`, `slotId`, `resourceDefId` |
@@ -1048,26 +1065,28 @@ producing consistent route variation per unit without runtime randomness or rese
 | `on_world_object_pickup` | World object collected by a unit | `worldObjectActorId`, `unitActorId` |
 | `on_tech_applied` | Technology takes effect | `techDefId`, `ownerId` |
 | `on_objective_complete` | Zone objective threshold met | `objectiveId`, `zoneId` |
+| `on_faction_stance_changed` | Faction relationship updated | `factionId`, `targetFactionId`, `newStance` |
 | `on_flag_set` | Named event flag set to `true` | `flagId` |
 
 ### 10.2 Event Definition
 
 ```
-EventDefinition {
-  id:       string
-  name:     string
-  hook:     HookId
-  filter:   EventFilter?
-  actions:  EventAction[]
+FEventDefinition {
+  Id:       FName
+  Name:     FString
+  Hook:     FName    // HookId — one of the hook names in §10.1
+  Filter:   TOptional<FEventFilter>
+  Actions:  TArray<FEventAction>
 }
 
-EventFilter {
-  buildingDefId:  string?
-  unitTypeDefId:  string?
-  zoneId:         string?
-  ownerId:        string?
-  radius:         float?
-  // all specified filters are ANDed
+FEventFilter {
+  BuildingDefId:  FName     // NAME_None = any
+  UnitTypeDefId:  FName
+  ZoneId:         FName
+  OwnerId:        FName
+  Radius:         float     // 0.0f = no radius filter
+  ResourceTag:    FName     // filter by resource tag on triggering hook; NAME_None = any
+  // all specified non-None/non-zero filters are ANDed
 }
 ```
 
@@ -1082,25 +1101,30 @@ EventFilter {
 | `ADD_SCOPED_RESOURCE` | Adds to zone-scoped resource | `zoneId`, `resourceDefId`, `quantity` |
 | `SET_FLAG` | Sets named world flag | `flagId`, `value: bool` |
 | `FIRE_EVENT` | Fires another event immediately | `eventDefId` |
-| `ENABLE_TASK` | Enables/disables a task on a building | `buildingActorId`, `taskDefId`, `enabled: bool` |
-| `SPAWN_WORLD_OBJECT` | Creates a world object at a position | `resourceDefId`, `quantity`, `position \| "self"` |
+| `ENABLE_TASK` | Enables/disables a task on a building | `buildingActorId`, `taskDefId`, `bEnabled: bool` |
+| `RESET_TASK_COUNT` | Resets `executionCount` and state to "idle" for a count-mode task | `buildingActorId`, `taskDefId`, `newCount: int32` |
+| `DISABLE_BUILDING` | Disables a building — no tasks run | `buildingActorId` |
+| `ENABLE_BUILDING` | Re-enables a previously disabled building | `buildingActorId` |
+| `SPAWN_WORLD_OBJECT` | Creates a container world object at a position | `contents: [{resourceDefId, quantity}]`, `position \| "self"` |
+| `GRANT_ABILITY` | Grants an ability to a specific unit or building | `abilityDefId`, `targetEntityId` |
+| `SET_FACTION_STANCE` | Changes relationship stance between two factions | `factionId`, `targetFactionId`, `stance` |
 | `APPLY_TECH` | Applies a technology | `techDefId`, `ownerId` |
-| `EMIT_LOG` | Writes to simulation log | `message: string` |
+| `EMIT_LOG` | Writes to simulation log | `message: FString` |
 
 ---
 
 ## 11. Connections
 
 ```
-Connection {
-  id:                   string
-  sourceBuildingId:     string
-  sourceResourceDefId:  string
-  destBuildingId:       string
-  destResourceDefId:    string
-  priority:             int
-  transferMode:         "unit_driven" | "automatic"
-  rateLimit:            float?
+FConnection {
+  Id:                   FName
+  SourceBuildingId:     FName
+  SourceResourceDefId:  FName
+  DestBuildingId:       FName
+  DestResourceDefId:    FName
+  Priority:             int32
+  TransferMode:         "unit_driven" | "automatic"    // UENUM
+  RateLimit:            float    // 0.0f = no limit (for automatic mode)
 }
 ```
 
@@ -1119,40 +1143,33 @@ and rejected because per-tile movement costs (grass vs stone per unit type) brea
 simplification assumptions. **HPA\*** operates on a coarser cluster graph; local A* within
 each cluster uses full tile cost data.
 
-### 12.2 ClusterCoord Struct
+### 12.2 ClusterCoord
 
-```
-ClusterCoord {
-  x:  int
-  y:  int
-}
-```
+Cluster coordinates use `FIntPoint` (`X`, `Y`).
 
 ### 12.3 Cluster Graph
 
 ```
-ClusterGraph {
-  clusters:  Cluster[][]    // [clusterY][clusterX]
+FClusterGraph {
+  Clusters:  TArray<TArray<FCluster>>    // [ClusterY][ClusterX]
 }
 
-Cluster {
-  coord:   ClusterCoord
-  dirty:   bool             // triggers edge recomputation next tick
-  edges:   ClusterEdge[]
+FCluster {
+  Coord:   FIntPoint
+  bDirty:  bool                   // triggers edge recomputation next tick
+  Edges:   TArray<FClusterEdge>
+  Boundaries: TArray<FClusterBoundary>
 }
 
-ClusterEdge {
-  targetCluster:  ClusterCoord
-  costs:          ClusterEdgeCost[]   // pre-computed per unit type
-  impassableFor:  string[]            // unitTypeIds that cannot cross this boundary;
-                                       // accounts for movement cost and the unit's own
-                                       // resolvedHeightDeltaLimit for the boundary tiles
+FClusterEdge {
+  TargetCluster:  FIntPoint
+  Costs:          TArray<FClusterEdgeCost>    // pre-computed per unit type
+  ImpassableFor:  TArray<FName>               // unitTypeIds that cannot cross this boundary
 }
 
-ClusterEdgeCost {
-  unitTypeId:  string
-  cost:        float    // pre-computed traversal cost incorporating tile movement costs
-                        // and elevation deltas at the cluster boundary
+FClusterEdgeCost {
+  UnitTypeId:  FName
+  Cost:        float    // pre-computed traversal cost (tile movement costs + elevation)
 }
 ```
 
@@ -1177,11 +1194,11 @@ dirty clusters are re-queued. Unaffected units keep their paths.
 ### 12.6 Path Request Queue
 
 ```
-PathRequest {
-  unitActorId:   string
-  destination:   TileCoord
-  priority:      int          // higher = processed sooner this tick
-  requestedAt:   float
+FPathRequest {
+  UnitActorId:   FName
+  Destination:   FIntPoint    // tile coord
+  Priority:      int32        // higher = processed sooner; convention: player_command=100, task=50, background=10
+  RequestedAt:   float        // world clock time; secondary sort key
 }
 ```
 
@@ -1242,12 +1259,14 @@ Designers may declare additional attributes on any Definition. Custom attributes
 the same modifier system as core attributes.
 
 ```
-CustomAttributeDefinition {
-  attributeId:   string    // e.g. "piety", "energy", "morale"
-  displayName:   string
-  baseValue:     float
-  minValue:      float?    // optional clamp
-  maxValue:      float?
+FCustomAttributeDefinition {
+  AttributeId:   FName      // e.g. "piety", "energy", "morale"
+  DisplayName:   FString
+  BaseValue:     float
+  MinValue:      float      // optional clamp; use -BIG_NUMBER to indicate no minimum
+  MaxValue:      float      // optional clamp; use BIG_NUMBER to indicate no maximum
+  bHasMinValue:  bool
+  bHasMaxValue:  bool
 }
 ```
 
@@ -1257,19 +1276,19 @@ from any source (equipment, techs, events).
 ### 13.3 Modifier
 
 ```
-Modifier {
-  id:               string              // unique instance id
-  sourceId:         string              // who applied this (tech id, resource def id, event id)
-  tags:             string[]            // queryable labels on this modifier e.g. "cursed"
-  grantsTag:        string | null       // if set, the entity bearing this modifier gains this tag
-                                        // e.g. MEDAL resource grants "ROYALTY" tag
-  attributeTarget:  string | null       // attribute id this modifier affects; null if tag/task-only
-  operation:        "additive" | "multiplicative"
-  value:            float               // additive: flat delta; multiplicative: factor (0.1 = +10%)
-  duration:         float | "indefinite"  // seconds; "indefinite" = until explicitly removed
-  elapsed:          float               // runtime: seconds this modifier has been active
-  enablesTasks:     string[]            // task ids to enable on the entity while this modifier is active
-  disablesTasks:    string[]            // task ids to disable on the entity while this modifier is active
+FModifier {
+  Id:               FName              // unique instance id
+  SourceId:         FName              // who applied this (tech id, resource def id, event id)
+  Tags:             TArray<FName>      // queryable labels e.g. "cursed", "armour"
+  GrantsTag:        FName              // NAME_None if not granting a tag;
+                                       // e.g. MEDAL resource grants "ROYALTY" tag
+  AttributeTarget:  FName              // attribute id this modifier affects; NAME_None if tag/task-only
+  Operation:        "additive" | "multiplicative"    // UENUM
+  Value:            float              // additive: flat delta; multiplicative: factor (0.1 = +10%)
+  Duration:         float              // seconds; -1.0f = indefinite (until explicitly removed)
+  Elapsed:          float              // runtime: seconds this modifier has been active
+  EnablesTasks:     TArray<FName>      // task ids to enable while this modifier is active
+  DisablesTasks:    TArray<FName>      // task ids to disable while this modifier is active
 }
 ```
 
@@ -1339,11 +1358,11 @@ applying their modifier stacks and optionally enabling or disabling tasks.
 ### 14.1 Equipment Slot Instance (Runtime)
 
 ```
-EquipmentSlotInstance {
-  slotId:          string            // matches a declared EquipmentSlotDeclaration
-  slotType:        string
-  equippedDefId:   string | null     // resource def id currently in this slot
-  modifierIds:     string[]          // ids of Modifiers currently applied by this equipment
+FEquipmentSlotInstance {
+  SlotId:          FName               // matches a declared FEquipmentSlotDeclaration
+  SlotType:        FName
+  EquippedDefId:   FName               // NAME_None = slot empty
+  ModifierIds:     TArray<FName>       // ids of FModifiers currently applied by this equipment
 }
 ```
 
@@ -1376,18 +1395,19 @@ If `resource.removable == false`, unequip is blocked. Otherwise:
 ### 14.4 ModifierTemplate
 
 Equipment and technologies declare modifiers as templates. At application time, a template
-is instantiated into a live `Modifier` with a unique `id`.
+is instantiated into a live `FModifier` with a unique id.
 
 ```
-ModifierTemplate {
-  tags:             string[]
-  grantsTag:        string | null
-  attributeTarget:  string | null
-  operation:        "additive" | "multiplicative"
-  value:            float
-  duration:         float | "indefinite"
-  enablesTasks:     string[]
-  disablesTasks:    string[]
+FModifierTemplate {
+  Tags:             TArray<FName>
+  GrantsTag:        FName               // NAME_None if not granting a tag
+  AttributeTarget:  FName               // NAME_None if tag/task-only
+  Operation:        "additive" | "multiplicative"    // UENUM
+  Value:            float
+  Duration:         float               // -1.0f = indefinite
+  EnablesTasks:     TArray<FName>
+  DisablesTasks:    TArray<FName>
+  GrantsAbility:    FName               // NAME_None if not granting an ability
 }
 ```
 
@@ -1409,35 +1429,36 @@ future instances of a target definition type, or trigger resource creation / eve
 ### 15.1 Tech Definition
 
 ```
-TechDefinition {
-  id:             string
-  name:           string
-  description:    string
-  scope:          "global" | "zone"
-  zoneId:         string?             // required if scope = "zone"
-  targetType:     "unit_type" | "building_type"
-  targetDefId:    string              // which definition type this tech affects
-  cost:           ResourceCost[]      // { resourceDefId, quantity }[] to apply this tech
-  effects:        TechEffect[]
+FTechDefinition {
+  Id:             FName
+  Name:           FString
+  Description:    FString
+  Prerequisites:  TArray<FName>       // techDefIds that must be active before this may be applied
+  Scope:          "global" | "zone" | "team" | "faction"    // UENUM
+  ZoneId:         FName               // required if Scope = "zone"; NAME_None otherwise
+  TargetType:     "unit_type" | "building_type"    // UENUM
+  TargetTags:     TArray<FName>       // if non-empty, only entities with ALL these tags are affected
+  TargetDefId:    FName               // NAME_None = any entity of TargetType
+  Cost:           TArray<FResourceCost>
+  Effects:        TArray<FTechEffect>
 }
 ```
 
 ### 15.2 Tech Effects
 
 ```
-TechEffect {
-  type:              "apply_modifier" | "create_resource" | "fire_event"
-  applicationRule:   "indefinite" | "once"
-  //   indefinite:  for apply_modifier — modifier is applied to all current instances and
-  //                to every future instance of targetDefId spawned while this tech is active
-  //   once:        effect fires once at application time for current instances only;
-  //                future instances do not receive it; used for create_resource and
-  //                one-shot fire_event effects
-  modifierTemplate:  ModifierTemplate?   // for apply_modifier
-  resourceDefId:     string?             // for create_resource
-  quantity:          int?
-  spawnPosition:     "player_keep" | TileCoord?
-  eventDefId:        string?             // for fire_event
+FTechEffect {
+  Type:              "apply_modifier" | "create_resource" | "fire_event"    // UENUM
+  ApplicationRule:   "indefinite" | "once"    // UENUM
+  //   indefinite:  for apply_modifier — modifier applied to all current instances and
+  //                every future instance of TargetDefId spawned while this tech is active
+  //   once:        effect fires once at application time; future instances unaffected
+  ModifierTemplate:  TOptional<FModifierTemplate>    // for apply_modifier
+  ResourceDefId:     FName               // for create_resource; NAME_None if unused
+  Quantity:          int32
+  SpawnPosition:     FName               // "player_keep" or NAME_None for TileCoord
+  SpawnTileCoord:    TOptional<FIntPoint>
+  EventDefId:        FName               // for fire_event; NAME_None if unused
 }
 ```
 
@@ -1461,11 +1482,11 @@ fires it every time a new instance of `targetDefId` is created.
 ### 15.3 Active Tech Instance (World State)
 
 ```
-ActiveTech {
-  techDefId:   string
-  ownerId:     string
-  appliedAt:   float     // world clock time
-  appliedModifierIds: string[]   // modifier ids applied to existing instances
+FActiveTech {
+  TechDefId:           FName
+  OwnerId:             FName
+  AppliedAt:           float             // world clock time
+  AppliedModifierIds:  TArray<FName>     // modifier ids applied to existing instances
 }
 ```
 
@@ -1486,27 +1507,24 @@ non-zero `maxHealth`, making the object destructible.
 ### 16.1 World Object Behavior (embedded in Resource Definition)
 
 ```
-WorldObjectBehavior {
-  canBePickedUp:             bool
-  pickupUnitTypeConstraints: string[]   // empty = any unit type may pick up
-  pickupTagConstraints:      string[]   // picking unit must have all these tags
-  timer:                     WorldObjectTimer | null   // null = no timer behavior
-  autoPickup:                bool       // default false; if true, units that overlap this
-                                        // object will automatically collect it if pickup
-                                        // conditions are met
+FWorldObjectBehavior {
+  bCanBePickedUp:             bool
+  PickupUnitTypeConstraints:  TArray<FName>    // empty = any unit type may pick up
+  PickupTagConstraints:       TArray<FName>    // picking unit must have all these tags
+  Timer:                      TOptional<FWorldObjectTimer>
+  bAutoPickup:                bool             // default false
 }
 ```
 
 #### WorldObjectTimer Struct
 
-Follows UE timer semantics — real-elapsed-time based, not tick-counted.
+Real-elapsed-time based, not tick-counted (consistent with UE timer semantics).
 
 ```
-WorldObjectTimer {
-  rate:       float          // seconds between firings; must be > 0
-  maxFirings: int | null     // null = fire indefinitely; 1 = fire once then stop;
-                             // N = fire N times then stop
-  onFire:     WorldObjectScript?   // script executed each time the timer fires
+FWorldObjectTimer {
+  Rate:       float      // seconds between firings; must be > 0
+  MaxFirings: int32      // 0 = fire indefinitely; 1 = fire once then stop; N = fire N times
+  OnFire:     TOptional<FWorldObjectScript>
 }
 ```
 
@@ -1559,24 +1577,33 @@ example, a poison cloud may apply damage on each firing and call `consume()` onl
 
 ### 16.3 World Object Actor (Runtime)
 
-`WorldObjectActor` implements `IInventoryHolder` always. It implements `IDamageable` and
-`IAttributeHolder` only when the designer declares a non-zero `maxHealth` on the resource's
-attribute set (making it destructible). It does not implement `IModifiable` or `IEquippable`.
+`AWorldObjectActor` implements `IInventoryHolder` always. It implements `IDamageable` and
+`IAttributeHolder` only when the designer declares a non-zero `maxHealth` (making it
+destructible). It does not implement `IModifiable` or `IEquippable`.
+
+All world objects — whether holding one resource type or many — use the unified **container**
+model. A single dropped item and a multi-resource demolition pile are both `AWorldObjectActor`
+instances; only the `Contents` slot count differs.
 
 ```
-WorldObjectActor {
-  // IInventoryHolder: { resourceDefId, quantity }
-  // IDamageable (optional): currentHealth
-  // IAttributeHolder (optional): attributes
+// AWorldObjectActor — UE AActor
+FWorldObjectActorData {
+  Id:              FName
+  OwnerId:         TOptional<FName>
+  Contents:        TArray<FContainerSlot>    // unified container; all world objects use this
+  Position:        FVector2D
+  TimerElapsed:    float    // seconds since last firing (resets each firing)
+  FiringCount:     int32    // number of times the timer has fired
+  TotalElapsed:    float    // total seconds since spawned
 
-  id:              string
-  ownerId:         string | null
-  resourceDefId:   string
-  quantity:        int
-  position:        { x: float, y: float }
-  timerElapsed:    float    // seconds since last firing (resets each firing)
-  firingCount:     int      // number of times the timer has fired so far
-  totalElapsed:    float    // total seconds since this world object was spawned
+  // Optional interface data (only when maxHealth declared):
+  CurrentHealth:   float
+  Attributes:      TArray<FAttributeDeclaration>
+}
+
+FContainerSlot {
+  ResourceDefId:  FName
+  Quantity:       int32
 }
 ```
 
@@ -1589,9 +1616,9 @@ World objects are not treated as tile occupants (`TileInstance.occupantId` is no
 
 By default, resources carried by a unit that dies are discarded. The `on_unit_death` event
 payload includes `assignedBuildingId` and `position`. Designers may attach an event handler
-to `on_unit_death` with a `SPAWN_WORLD_OBJECT` action to drop some or all carried resources
-as world objects at the death position. The resource's `worldObjectBehavior` must be non-null
-for it to be spawnable.
+to `on_unit_death` with a `SPAWN_WORLD_OBJECT` action to create a **container** at the death
+position holding all (or a subset of) carried resources. If the unit carries multiple resource
+types, a single `AWorldObjectActor` is spawned with one `FContainerSlot` per resource type.
 
 **"Steals resources on kill" pattern:**
 A unit type or equipment item carries a modifier that tags the unit `"LOOTER"`. An
@@ -1615,10 +1642,13 @@ the object will automatically collect it if conditions are met. This is opt-in p
 definition and off by default. Designers use it for things like gold coins or ambient
 collectables, not standard inventory items.
 
-**Pickup execution:** When a pickup is executed, the world object's `quantity` is distributed
-into the unit's empty `CarrySlots` up to the resource's `stackSize` per slot. If the unit
-has insufficient empty slots for the full quantity, the remainder stays as a world object with
-reduced quantity. `on_world_object_pickup` fires on any successful partial or full collection.
+**Pickup execution (container):** Pickup from a container is **greedy** — the unit takes as
+many resources as available `FCarrySlots` permit, filling `Contents` in order. Each
+`FContainerSlot` is distributed into empty carry slots up to that resource's `stackSize` per
+slot. If the unit fills all slots before emptying the container, remaining resources stay in
+the container with reduced quantities. `on_world_object_pickup` fires on any successful
+partial or full collection. The container is removed when all `FContainerSlot` quantities
+reach 0.
 
 ---
 
