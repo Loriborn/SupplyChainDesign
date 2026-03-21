@@ -29,7 +29,7 @@ Objects, and optionally equipped into equipment slots on units and buildings.
 | `storageScope` | `"player" \| "zone" \| "building_tag"` | **Abstract only** |
 | `storageBuildingTag` | `string?` | **Abstract, `building_tag` scope only** |
 | `stackSize` | `int` | **Physical only.** Max quantity per inventory slot |
-| `tags` | `string[]` | Classification labels |
+| `tags` | `string[]` | Classification labels. Queryable in `EventFilter` (filter by resource tag) and `StepPrecondition` (preconditions that test resource tags). See §3.5. |
 | `worldObjectBehavior` | `WorldObjectBehavior \| null` | Defines behavior when this resource exists as a dropped world entity; `null` = cannot be dropped. See §16 |
 | `equippable` | `bool` | Whether this resource can be placed into an equipment slot |
 | `fitsSlotTypes` | `string[]` | **Equippable only.** Slot type strings this resource fits into |
@@ -51,6 +51,10 @@ Objects, and optionally equipped into equipment slots on units and buildings.
 resolved (e.g. the designated building was demolished), the quantity is silently discarded.
 No error is raised.
 
+**Overflow when storage is full:** If the resolved storage actor exists but its
+`AbstractInventorySlot.quantity` is already at `capacity`, any excess production is also
+silently discarded. The slot is not allowed to exceed its declared capacity.
+
 > **Designer guidance:** Abstract resources should target storage that is permanent for the
 > session. `"player"` and `"zone"` scopes are always resolvable. A `"building_tag"` storage
 > building should be treated as indestructible.
@@ -62,6 +66,41 @@ Building Actor, Unit Actor, or World Object Actor. Abstract resource instances a
 `AbstractInventorySlot` on Zone Instances or Player State Actors. Every quantity has a
 defined owning actor at all times. When a unit carrying resources dies, those resources are
 discarded by default. See §16.5 for the drop-on-death extension.
+
+### 3.5 Resource Tags in Filters and Preconditions
+
+`Resource.tags` is consumed by two systems:
+
+**Event filters:** `EventFilter` supports a `resourceTag` field. When set, the event only
+fires if the resource involved in the triggering hook bears that tag. For example, a filter
+with `resourceTag: "sacred"` on an `on_world_object_pickup` hook fires only when a sacred
+resource is collected.
+
+```
+EventFilter {
+  buildingDefId:  string?
+  unitTypeDefId:  string?
+  zoneId:         string?
+  ownerId:        string?
+  radius:         float?
+  resourceTag:    string?     // NEW: filter by resource tag (single tag; all specified
+                               //      filters are ANDed as usual)
+}
+```
+
+**Step preconditions:** `StepPrecondition` supports a `"resource_has_tag"` type that tests
+whether a resource in a specified slot bears a given tag. This allows task steps to behave
+differently based on what category of resource is present.
+
+```
+StepPrecondition {
+  // existing types ...
+  type: "resource_has_tag"
+  namespace:     "local" | "available"
+  resourceSlot:  string       // resourceDefId of the slot to inspect
+  tag:           string       // the resource definition must have this tag
+}
+```
 
 ---
 
@@ -228,22 +267,47 @@ example, a poison cloud may apply damage on each firing and call `consume()` onl
 `IAttributeHolder` only when the designer declares a non-zero `maxHealth` on the resource's
 attribute set (making it destructible). It does not implement `IModifiable` or `IEquippable`.
 
+All world objects — whether they hold one resource type or many — use the unified
+**container** model. A single-resource dropped item and a multi-resource demolition pile
+are both `WorldObjectActor` instances; the only difference is how many `ContainerSlot`
+entries they have.
+
 ```
 WorldObjectActor {
-  // IInventoryHolder: { resourceDefId, quantity }
+  // IInventoryHolder: contents (ContainerSlot[])
   // IDamageable (optional): currentHealth
   // IAttributeHolder (optional): attributes
 
   id:              string
   ownerId:         string | null
-  resourceDefId:   string
-  quantity:        int
+  contents:        ContainerSlot[]     // all resource types held by this container
   position:        { x: float, y: float }
   timerElapsed:    float    // seconds since last firing (resets each firing)
   firingCount:     int      // number of times the timer has fired so far
   totalElapsed:    float    // total seconds since this world object was spawned
 }
+
+ContainerSlot {
+  resourceDefId:  string
+  quantity:       int
+}
 ```
+
+**Spawning containers:** Designers may create world object containers via:
+- `SPAWN_WORLD_OBJECT` event action (specify `contents[]` rather than a single resource)
+- `on_unit_death` / `on_building_demolished` handlers that drop all carried/stored resources
+- Map authoring (pre-placed containers at specific positions)
+
+If a `SPAWN_WORLD_OBJECT` action specifies a single resource, the resulting `WorldObjectActor`
+has `contents` with one `ContainerSlot`. The container model is always used regardless of
+slot count.
+
+**Inherited behavior:** Container world objects inherit `WorldObjectBehavior` from the
+**primary** resource definition — the first slot's `resourceDefId`. For demolition and
+unit-death containers (multi-resource), the engine uses a **generic container behavior**
+defined at the world level with a decay timer so that dropped items do not persist
+indefinitely by default. Designers may override this via the event handler that spawns the
+container.
 
 ### 16.4 Tile Passability
 
@@ -254,15 +318,21 @@ World objects are not treated as tile occupants (`TileInstance.occupantId` is no
 
 By default, resources carried by a unit that dies are discarded. The `on_unit_death` event
 payload includes `assignedBuildingId` and `position`. Designers may attach an event handler
-to `on_unit_death` with a `SPAWN_WORLD_OBJECT` action to drop some or all carried resources
-as world objects at the death position. The resource's `worldObjectBehavior` must be non-null
-for it to be spawnable.
+to `on_unit_death` with a `SPAWN_WORLD_OBJECT` action to create a **container** at the death
+position holding all (or a subset of) carried resources. All carried resources that should
+be dropped are merged into a single `WorldObjectActor` with one `ContainerSlot` per resource
+type.
+
+**Multi-resource drop:** If a unit carries three different resource types when it dies and
+the designer's event handler drops all of them, a single container world object is spawned
+with three `ContainerSlot` entries. Players targeting the container with a worker will pick
+up all contents (greedy; see §16.6).
 
 **"Steals resources on kill" pattern:**
 A unit type or equipment item carries a modifier that tags the unit `"LOOTER"`. An
 `on_unit_death` event filtered for attacker tag `"LOOTER"` fires a `SPAWN_WORLD_OBJECT`
-action, creating dropped resources at the killed unit's position. The killer may then collect
-them. This is fully designer-authored — no special system behavior is required.
+action, creating a dropped resource container at the killed unit's position. The killer may
+then collect it. This is fully designer-authored — no special system behavior is required.
 
 ### 16.6 Pickup
 
@@ -277,13 +347,19 @@ overlapping it. Pickup is initiated in one of two ways:
 
 `WorldObjectBehavior.autoPickup: true` enables the passive exception — units overlapping
 the object will automatically collect it if conditions are met. This is opt-in per resource
-definition and off by default. Designers use it for things like gold coins or ambient
-collectables, not standard inventory items.
+definition and off by default.
 
-**Pickup execution:** When a pickup is executed, the world object's `quantity` is distributed
-into the unit's empty `CarrySlots` up to the resource's `stackSize` per slot. If the unit
-has insufficient empty slots for the full quantity, the remainder stays as a world object with
-reduced quantity. `on_world_object_pickup` fires on any successful partial or full collection.
+**Pickup execution (container):** Pickup from a container is **greedy by default** — the
+unit takes as many resources from the container as its available `CarrySlots` can hold,
+filling slots in `contents` order. Each `ContainerSlot` is distributed into the unit's
+empty slots up to that resource's `stackSize` per slot. If the unit fills all slots before
+emptying the container, the remaining resources stay in the container with reduced quantities.
+`on_world_object_pickup` fires on any successful partial or full collection. The container
+world object is removed from the world when all `ContainerSlot` quantities reach 0.
+
+> **Future UX consideration:** Selective pickup from a multi-resource container (choosing
+> specific resource types) may be exposed via a context menu in a future UX pass. The default
+> greedy behaviour is specified here; selective pickup is not yet defined.
 
 ---
 
@@ -293,11 +369,20 @@ reduced quantity. `on_world_object_pickup` fires on any successful partial or fu
   `InventorySlot` or `CarrySlot` on a Building, Unit, or World Object Actor. Abstract
   resources live in `AbstractInventorySlot` on a Zone Instance, Player State Actor, or
   designated Building Actor. Neither class may exist without an owning actor.
-- **Equipment is the sole mechanism for stat and capability modification.** There are no
-  separate upgrade or patch structures. All changes — permanent or timed, unit or building —
-  flow through the modifier stack and equipment system.
+- **All world objects use the unified container model.** `WorldObjectActor.contents` is
+  always `ContainerSlot[]`. Single-resource and multi-resource dropped items are structurally
+  identical — only the slot count differs.
+- **Abstract resource overflow is a silent discard.** When the target storage actor's slot is
+  at capacity, excess production is silently discarded. No error, no backpressure.
+- **Pickup is greedy by default.** Units take as many resources as carry slots permit, filling
+  in `contents` slot order. Leftovers remain in the container.
 - **Pickup is player-directed by default.** Units do not automatically collect world objects
   by proximity. Pickup requires an explicit player command, a script action, or a resource
   with `autoPickup: true`.
+- **Resource tags are consumed by event filters and preconditions.** They are not purely
+  cosmetic; `EventFilter.resourceTag` and `StepPrecondition` type `"resource_has_tag"` query them.
 - **World objects do not block pathfinding.** Units overlap them freely. Interaction is
   intentional only — via player command, script action, or `autoPickup`.
+- **Equipment is the sole mechanism for stat and capability modification.** There are no
+  separate upgrade or patch structures. All changes — permanent or timed, unit or building —
+  flow through the modifier stack and equipment system.
