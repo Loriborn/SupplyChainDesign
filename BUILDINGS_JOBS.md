@@ -19,7 +19,7 @@ entity's active modifier stack (see [Entities/Workers §13](ENTITIES_WORKERS.md)
 | `name` | `FString` | Display name |
 | `icon` | `TSoftObjectPtr<UTexture2D>` | Visual / map representation |
 | `footprint` | `TArray<TArray<bool>>` | Binary occupancy grid; see §4.1.1 |
-| `tags` | `TArray<FName>` | Arbitrary classification labels |
+| `tags` | `FGameplayTagContainer` | Arbitrary classification labels |
 
 #### 4.1.1 Footprint Grid
 
@@ -152,8 +152,8 @@ always enforced and cannot be overridden by script.
 ```
 FAccessPoint {
   Id:      FName
-  Offset:  FIntPoint        // tile offset from building origin
-  Tags:    TArray<FName>    // labels used to filter which units may use this access point
+  Offset:  FIntPoint              // tile offset from building origin
+  Tags:    FGameplayTagContainer  // labels used to filter which units may use this access point
 }
 ```
 
@@ -208,9 +208,9 @@ via task steps or event actions, applying their modifiers to the building.
 
 ```
 FEquipmentSlotDeclaration {
-  SlotId:    FName      // unique within this building e.g. "millstone", "furnace"
-  SlotType:  FName      // matched against resource fitsSlotTypes
-  Label:     FString    // display name shown in UI
+  SlotId:    FName          // unique within this building e.g. "millstone", "furnace"
+  SlotType:  FGameplayTag   // matched against resource fitsSlotTypes
+  Label:     FString        // display name shown in UI
 }
 ```
 
@@ -283,9 +283,9 @@ FWorkStepDefinition {
 FWorkerRequirement {
   UnitTypeId:       FName
   Count:            int32           // number of units of this type required (≥ 1)
-  TagRequirements:  TArray<FName>   // present units must have ALL these tags
-  AccessPointTags:  TArray<FName>   // unit must path to access point bearing ALL these tags;
-                                    // empty = any access point (see §4.5)
+  TagRequirements:  FGameplayTagContainer  // present units must have ALL these tags
+  AccessPointTags:  FGameplayTagContainer  // unit must path to access point bearing ALL these tags;
+                                           // empty = any access point (see §4.5)
   Role:             "required" | "bonus"    // UENUM
   BonusEffect:      TOptional<FBonusWorkerEffect>
 }
@@ -331,7 +331,7 @@ FStepPrecondition {
   TargetBuildingId: FName        // NAME_None if unused
   RequiredState:    FName        // NAME_None if unused
   FlagId:           FName        // NAME_None if unused
-  Tag:              FName        // for entity_has_tag / resource_has_tag types
+  Tag:              FGameplayTag  // for entity_has_tag / resource_has_tag types
 }
 ```
 
@@ -568,8 +568,8 @@ FEventFilter {
   ZoneId:         FName
   OwnerId:        FName
   Radius:         float     // 0.0f = no radius filter
-  ResourceTag:    FName     // filter by resource tag; NAME_None = any
-  // all non-None/non-zero fields are ANDed
+  ResourceTag:    FGameplayTag  // filter by resource tag; empty tag = any
+  // all non-empty/non-zero fields are ANDed
 }
 ```
 
@@ -694,7 +694,7 @@ FTechDefinition {
   // "team"    — affects all players sharing the same faction as OwnerId
   // "faction" — synonym for "team"; affects all units/buildings of the OwnerId's faction
   TargetType:     "unit_type" | "building_type"    // UENUM
-  TargetTags:     TArray<FName>       // if non-empty, tech affects only entities with ALL these tags
+  TargetTags:     FGameplayTagContainer  // if non-empty, tech affects only entities with ALL these tags
   TargetDefId:    FName               // NAME_None = any entity of TargetType (filtered by TargetTags)
   Cost:           TArray<FResourceCost>
   Effects:        TArray<FTechEffect>

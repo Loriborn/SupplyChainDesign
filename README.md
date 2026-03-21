@@ -92,6 +92,8 @@ All struct and field definitions use the following UE-native type notation:
 | `FLinearColor` | `FLinearColor` | RGBA color value. |
 | `TSoftObjectPtr<UTexture2D>` | `TSoftObjectPtr<UTexture2D>` | Lazy-loaded icon/texture asset reference. |
 | `TOptional<FName>` | `TOptional<FName>` | Nullable ID (e.g. `occupantId`, `assignedBuildingId`). |
+| `FGameplayTag` | `FGameplayTag` | Single hierarchical gameplay tag (e.g. `Unit.Role.Mounted`). Registered in project tag table; Blueprint picker UI. |
+| `FGameplayTagContainer` | `FGameplayTagContainer` | Set of `FGameplayTag`s. Supports `HasAll` / `HasAny` queries. Used for classification labels, filter sets, and tag requirements. |
 
 **Enums** are shown as string literals (e.g. `"idle" | "pathing"`) in code blocks for
 readability. In C++ they are `UENUM(BlueprintType)` with `uint8` underlying type.
@@ -241,7 +243,7 @@ in Simulation Mode is defined there — it is only placed and observed.
 | `movementCostDefault` | `float` | Fallback pathing weight for unlisted unit types (1.0 = normal) |
 | `movementCosts` | `TArray<FMovementCostEntry>` | Per-unit-type cost overrides |
 | `allowedForBuilding` | `bool` | Default permission for building placement |
-| `tags` | `TArray<FName>` | Classification labels used by placement rule scripts |
+| `tags` | `FGameplayTagContainer` | Classification labels used by placement rule scripts |
 
 #### MovementCostEntry Struct
 
@@ -381,14 +383,14 @@ Objects, and optionally equipped into equipment slots on units and buildings.
 | `unit` | `FString` | Unit label (e.g. "kg", "units", "happiness") |
 | `abstract` | `bool` | If true, abstract resource; not carried or stored in inventory |
 | `storageScope` | `"player" \| "zone" \| "building_tag"` | **Abstract only** (UENUM) |
-| `storageBuildingTag` | `FName` | **Abstract, `building_tag` scope only.** `NAME_None` if unused. |
+| `storageBuildingTag` | `FGameplayTag` | **Abstract, `building_tag` scope only.** Empty tag if unused. |
 | `stackSize` | `int32` | **Physical only.** Max quantity per inventory slot |
-| `tags` | `TArray<FName>` | Classification labels |
+| `tags` | `FGameplayTagContainer` | Classification labels |
 | `worldObjectBehavior` | `TOptional<FWorldObjectBehavior>` | Defines behavior when dropped as a world entity; unset = cannot be dropped. See §16 |
 | `equippable` | `bool` | Whether this resource can be placed into an equipment slot |
-| `fitsSlotTypes` | `TArray<FName>` | **Equippable only.** Slot type names this resource fits into |
+| `fitsSlotTypes` | `FGameplayTagContainer` | **Equippable only.** Slot type tags this resource fits into |
 | `unitTypeConstraints` | `TArray<FName>` | **Equippable only.** If non-empty, only unit types with a matching id may equip this resource |
-| `tagConstraints` | `TArray<FName>` | **Equippable only.** The equipping entity must possess all listed tags |
+| `tagConstraints` | `FGameplayTagContainer` | **Equippable only.** The equipping entity must possess all listed tags |
 | `removable` | `bool` | **Equippable only.** Default `true`. If `false`, once equipped cannot be removed. Used for building upgrades. |
 | `modifiers` | `TArray<FModifierTemplate>` | **Equippable only.** Modifiers applied while this resource is equipped. See §13 |
 | `exclusiveCarry` | `bool` | If `true`, a unit carrying this resource cannot carry other resources simultaneously |
@@ -432,7 +434,7 @@ entity's active modifier stack (§13).
 | `name` | `FString` | Display name |
 | `icon` | `TSoftObjectPtr<UTexture2D>` | Visual / map representation |
 | `footprint` | `TArray<TArray<bool>>` | Binary occupancy grid; see §4.1.1 |
-| `tags` | `TArray<FName>` | Arbitrary classification labels |
+| `tags` | `FGameplayTagContainer` | Arbitrary classification labels |
 
 #### 4.1.1 Footprint Grid
 
@@ -561,8 +563,8 @@ always enforced and cannot be overridden by script.
 ```
 FAccessPoint {
   Id:      FName
-  Offset:  FIntPoint    // tile offset from building origin
-  Tags:    TArray<FName>
+  Offset:  FIntPoint              // tile offset from building origin
+  Tags:    FGameplayTagContainer
 }
 ```
 
@@ -601,9 +603,9 @@ via task steps or event actions, applying their modifiers to the building.
 
 ```
 FEquipmentSlotDeclaration {
-  SlotId:    FName      // unique within this building e.g. "millstone", "furnace"
-  SlotType:  FName      // matched against resource fitsSlotTypes
-  Label:     FString    // display name shown in UI
+  SlotId:    FName          // unique within this building e.g. "millstone", "furnace"
+  SlotType:  FGameplayTag   // matched against resource fitsSlotTypes
+  Label:     FString        // display name shown in UI
 }
 ```
 
@@ -660,10 +662,10 @@ FWorkStepDefinition {
 
 FWorkerRequirement {
   UnitTypeId:       FName
-  Count:            int32          // number of units of this type required (≥ 1)
-  TagRequirements:  TArray<FName>  // present units must have ALL these tags
-  AccessPointTags:  TArray<FName>  // unit must path to access point bearing ALL these tags
-  Role:             "required" | "bonus"    // UENUM
+  Count:            int32                  // number of units of this type required (≥ 1)
+  TagRequirements:  FGameplayTagContainer  // present units must have ALL these tags
+  AccessPointTags:  FGameplayTagContainer  // unit must path to access point bearing ALL these tags
+  Role:             "required" | "bonus"   // UENUM
   BonusEffect:      TOptional<FBonusWorkerEffect>
 }
 ```
@@ -682,8 +684,8 @@ FStepPrecondition {
   Quantity:         int32
   TargetBuildingId: FName     // NAME_None if unused
   RequiredState:    FName     // NAME_None if unused
-  FlagId:           FName     // NAME_None if unused
-  Tag:              FName     // for entity_has_tag type
+  FlagId:           FName         // NAME_None if unused
+  Tag:              FGameplayTag  // for entity_has_tag type
 }
 ```
 
@@ -741,7 +743,7 @@ Workers and combat units are the same type. Role is expressed entirely through f
 | `id` | `FName` | Unique identifier |
 | `name` | `FString` | Display name |
 | `icon` | `TSoftObjectPtr<UTexture2D>` | Visual representation |
-| `tags` | `TArray<FName>` | Classification labels (e.g. `"military"`, `"civilian"`, `"mounted"`) |
+| `tags` | `FGameplayTagContainer` | Classification labels (e.g. `Unit.Role.Military`, `Unit.Role.Civilian`, `Unit.Movement.Mounted`) |
 | `heightDeltaLimitDefault` | `float` | Max elevation change this unit type can traverse per tile edge when no per-tile-type override is defined |
 | `heightDeltaLimits` | `TArray<FHeightDeltaEntry>` | Per-tile-type override table; mirrors the `movementCosts` pattern |
 
@@ -817,8 +819,8 @@ count is fixed by definition.
 
 ```
 FEquipmentSlotDeclaration {
-  SlotId:    FName      // unique within this unit type e.g. "head", "body", "neck", "weapon"
-  SlotType:  FName      // matched against resource fitsSlotTypes
+  SlotId:    FName          // unique within this unit type e.g. "head", "body", "neck", "weapon"
+  SlotType:  FGameplayTag   // matched against resource fitsSlotTypes
   Label:     FString
 }
 ```
@@ -1085,7 +1087,7 @@ FEventFilter {
   ZoneId:         FName
   OwnerId:        FName
   Radius:         float     // 0.0f = no radius filter
-  ResourceTag:    FName     // filter by resource tag on triggering hook; NAME_None = any
+  ResourceTag:    FGameplayTag  // filter by resource tag on triggering hook; empty tag = any
   // all specified non-None/non-zero filters are ANDed
 }
 ```
@@ -1279,9 +1281,9 @@ from any source (equipment, techs, events).
 FModifier {
   Id:               FName              // unique instance id
   SourceId:         FName              // who applied this (tech id, resource def id, event id)
-  Tags:             TArray<FName>      // queryable labels e.g. "cursed", "armour"
-  GrantsTag:        FName              // NAME_None if not granting a tag;
-                                       // e.g. MEDAL resource grants "ROYALTY" tag
+  Tags:             FGameplayTagContainer  // queryable labels e.g. Modifier.Cursed, Modifier.Armour
+  GrantsTag:        FGameplayTag          // empty tag if not granting a tag;
+                                          // e.g. MEDAL resource grants Unit.Status.Royalty
   AttributeTarget:  FName              // attribute id this modifier affects; NAME_None if tag/task-only
   Operation:        "additive" | "multiplicative"    // UENUM
   Value:            float              // additive: flat delta; multiplicative: factor (0.1 = +10%)
@@ -1360,7 +1362,7 @@ applying their modifier stacks and optionally enabling or disabling tasks.
 ```
 FEquipmentSlotInstance {
   SlotId:          FName               // matches a declared FEquipmentSlotDeclaration
-  SlotType:        FName
+  SlotType:        FGameplayTag
   EquippedDefId:   FName               // NAME_None = slot empty
   ModifierIds:     TArray<FName>       // ids of FModifiers currently applied by this equipment
 }
@@ -1399,9 +1401,9 @@ is instantiated into a live `FModifier` with a unique id.
 
 ```
 FModifierTemplate {
-  Tags:             TArray<FName>
-  GrantsTag:        FName               // NAME_None if not granting a tag
-  AttributeTarget:  FName               // NAME_None if tag/task-only
+  Tags:             FGameplayTagContainer
+  GrantsTag:        FGameplayTag        // empty tag if not granting a tag
+  AttributeTarget:  FName              // NAME_None if tag/task-only
   Operation:        "additive" | "multiplicative"    // UENUM
   Value:            float
   Duration:         float               // -1.0f = indefinite
@@ -1437,7 +1439,7 @@ FTechDefinition {
   Scope:          "global" | "zone" | "team" | "faction"    // UENUM
   ZoneId:         FName               // required if Scope = "zone"; NAME_None otherwise
   TargetType:     "unit_type" | "building_type"    // UENUM
-  TargetTags:     TArray<FName>       // if non-empty, only entities with ALL these tags are affected
+  TargetTags:     FGameplayTagContainer  // if non-empty, only entities with ALL these tags are affected
   TargetDefId:    FName               // NAME_None = any entity of TargetType
   Cost:           TArray<FResourceCost>
   Effects:        TArray<FTechEffect>
@@ -1510,7 +1512,7 @@ non-zero `maxHealth`, making the object destructible.
 FWorldObjectBehavior {
   bCanBePickedUp:             bool
   PickupUnitTypeConstraints:  TArray<FName>    // empty = any unit type may pick up
-  PickupTagConstraints:       TArray<FName>    // picking unit must have all these tags
+  PickupTagConstraints:       FGameplayTagContainer  // picking unit must have all these tags
   Timer:                      TOptional<FWorldObjectTimer>
   bAutoPickup:                bool             // default false
 }
