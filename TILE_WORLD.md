@@ -45,6 +45,7 @@ Tile coordinates use `FIntPoint` (`X`, `Y`).
 | `tileDefId` | `FName` | Reference to Tile Definition |
 | `elevation` | `int32` | Elevation of this cell in height units above the base datum (0 = water level). Multiply by `World.heightScalar` to get world-unit height. |
 | `occupantId` | `TOptional<FName>` | Building Actor occupying this cell, if any. Units never set this field — only buildings do. |
+| `archPassable` | `bool` | Set `true` by buildings that own this tile but leave the ground-level passage open (e.g. gatehouse arch tiles). When `true`, `occupantId != null` does not block ground-level pathing. Default `false`. |
 | `zoneId` | `TOptional<FName>` | Zone this cell belongs to, if any. Unset = unclaimed; any player may build on unclaimed tiles unless a placement rule prevents it. |
 
 Stored as flat `TArray<FTileInstance>` indexed by `Y * MapWidth + X`.
@@ -200,7 +201,8 @@ Nothing is cached outside of World state.
 | `elevationCostFactor` | `float` | See §1.4 |
 | `pathBudgetPerTick` | `int32` | See §1.4 |
 | `tiles` | `TArray<FTileInstance>` | Flat array; index = `Y * MapWidth + X` |
-| `clusterGraph` | `FClusterGraph` | Hierarchical pathfinding graph; see §12 |
+| `clusterGraph` | `FClusterGraph` | Ground-level hierarchical pathfinding graph; see §12 |
+| `elevatedGraph` | `FElevatedNavGraph` | Sparse elevated navigation graph; see §12.9 |
 | `pathRequestQueue` | `TArray<FPathRequest>` | Pending pathfinding requests |
 | `zones` | `TArray<FZoneInstance>` | All zone instances |
 | `buildingActors` | `TArray<ABuildingActor*>` | All placed buildings |
@@ -398,7 +400,9 @@ edgeCost = resolvedMovementCost(unitTypeId, destTile)
 
 Edge rejected (impassable) if:
 - `destTile.passable == false`
-- `destTile.occupantId != null`  ← any building occupant makes the tile fully impassable;
+- `destTile.occupantId != null && !destTile.archPassable`  ← any building occupant makes
+                                     the tile impassable unless the building explicitly
+                                     declares it ground-passable (e.g. gatehouse arch tiles);
                                      units never set `occupantId` and never block tiles
 - `abs(destTile.elevation - srcTile.elevation) > resolvedHeightDeltaLimit(unitTypeId, destTile)`
 
@@ -440,6 +444,147 @@ Units advance along `localPath` by `effectiveMovementSpeed * deltaTime` per tick
 On cluster boundary reached: next cluster's `localPath` computed on demand.
 Units overlap freely; no reservation or avoidance system.
 
+### 12.9 Elevated Navigation (Verticality)
+
+The ground HPA\* graph (§12.3) covers the full tile grid at ground level. When wall
+structures, towers, or gatehouses are placed, a second sparse nav graph — the **elevated
+graph** — is built from those buildings' elevated-surface tiles.
+
+The two graphs are fully independent. A unit belongs to exactly one at any time,
+tracked by `FUnitState.currentNavLayer` and `FUnitState.currentElevatedComponentId`.
+
+#### Elevated Graph Structure
+
+The elevated graph is **not** a full parallel tile grid. It is a sparse collection of
+connected components — one per disconnected wall chain. A wall chain is any group of
+elevated-surface tiles reachable from one another without descending to ground. Each
+component runs its own HPA\* cluster graph, built identically to §12.3 but scoped to
+that component's tiles only.
+
+```
+FElevatedNavGraph {
+  Components:    TArray<FElevatedComponent>
+  Transitions:   TArray<FNavTransition>       // indexed by tile coord for fast lookup
+}
+
+FElevatedComponent {
+  Id:            FName                        // stable until graph rebuild
+  TileSet:       TArray<FIntPoint>            // all tiles belonging to this wall chain
+  ClusterGraph:  FClusterGraph                // HPA* graph scoped to TileSet
+}
+```
+
+#### Transition Tiles
+
+Stair and ramp buildings register specific footprint tiles as ground↔elevated transitions
+via `elevatedTransitionCells` (see [Buildings/Jobs §4.1.2](BUILDINGS_JOBS.md)). Each
+produces an `FNavTransition` linking a ground-layer tile to an elevated component tile.
+
+```
+FNavTransition {
+  GroundTile:         FIntPoint
+  ElevatedTile:       FIntPoint
+  ComponentId:        FName       // which elevated component this connects to
+  Cost:               float       // traversal cost to change levels
+}
+```
+
+Transitions are the only mechanism connecting the two graphs. A unit on a wall chain
+can only reach ground by pathing to a transition tile and crossing it.
+
+#### Unit Nav Layer State
+
+`FUnitState` gains:
+
+| Field | Type | Description |
+|---|---|---|
+| `currentNavLayer` | `"ground" \| "elevated"` | Which graph this unit currently belongs to |
+| `currentElevatedComponentId` | `TOptional<FName>` | Elevated component ID; `NAME_None` when on ground |
+
+Path queries include source and destination layer. If a unit on an elevated component
+needs to reach a ground-layer target, the abstract path must include a transition edge
+to descend. Visual Z for a unit on an elevated surface is derived from the `wallElevation`
+value on the building definition occupying that tile (see [Buildings/Jobs §4.1.2](BUILDINGS_JOBS.md)).
+
+#### Graph Invalidation on Demolition
+
+When a wall-type building is demolished:
+
+1. Its tiles are removed from the elevated component's `TileSet`.
+2. A flood-fill over remaining tiles determines whether the component stays connected or
+   splits into two or more disconnected components.
+3. Split components are assigned new `Id` values and re-registered.
+4. Units on components that are now entirely disconnected from any transition tile are
+   flagged as stranded; the game logic layer is responsible for handling this case
+   (e.g. forcing a teleport to ground, triggering an event, or treating the unit as lost).
+5. Ground clusters overlapping the demolished footprint are marked dirty per §12.5.
+
+#### Variable Wall Heights
+
+Wall height is a visual and gameplay property of the building definition (`wallElevation`),
+not a nav property. Two adjacent wall segments at different heights are nav-disconnected
+unless a stair building explicitly bridges them — the nav graph encodes this naturally
+since stairs are the sole source of transition edges. Actual Z height matters for:
+- Rendering (unit visual Z offset on the elevated surface)
+- Attack range and line-of-sight calculations (elevation advantage)
+- Determining which stair types are valid connectors between height levels
+
+The HPA\* graphs require no knowledge of actual Z height — only tile connectivity.
+
+---
+
+## 17. Terrain Rendering
+
+Tiles are pure simulation data (§1). The world tile grid has no associated mesh or world
+actor. The visible terrain surface is a procedural mesh managed by the
+**RealtimeMeshComponent** (RMC), a third-party UE5 plugin by TriAxis Games.
+
+### 17.1 Chunking
+
+The terrain mesh is divided into chunks — one per zone or one per fixed NxN tile region.
+Matching chunk boundaries to `clusterSize` is recommended so cluster dirty events can
+double as chunk dirty flags. Each chunk is an independent `ARealtimeMeshActor`. Only the
+chunk(s) covering changed tiles are regenerated; all other chunks are untouched.
+
+### 17.2 Tile Height
+
+Each chunk vertex is positioned at world-unit height `TileInstance.elevation * World.heightScalar`.
+Terrain geometry is regenerated from live tile data whenever tiles in the chunk are modified.
+
+### 17.3 Tile Type → Material
+
+Tile visual type (grass, stone, sand, etc.) is encoded as a per-vertex **material blend
+index** written into a UV channel, not vertex colors. A single terrain material samples a
+texture array by index, with interpolated UV values providing smooth blending between
+adjacent tile types. This approach:
+
+- Avoids vertex color instability (no Nanite dependency, no cluster-boundary flicker)
+- Supports smooth tile-type transitions without additional geometry
+- Is forward-compatible with future rendering pipeline changes
+
+### 17.4 Building Footprint Flattening
+
+When a building is placed, the terrain chunk(s) under its footprint are regenerated with
+all footprint-tile vertices forced to a uniform height. The target height is
+designer-configurable per building definition (average of footprint elevations, minimum,
+or a fixed offset). This is a **visual-only operation** — `TileInstance.elevation` data
+is not modified. When the building is demolished the chunk regenerates from original tile
+elevation data.
+
+### 17.5 Collision
+
+The terrain mesh carries **no physics collision**. Units path via the mathematical tile
+graph (§12); no world-space mesh raycasts are performed for unit movement. Visual-only
+physics (particle collision, cosmetic debris) may use a lightweight collision
+representation if needed, configured independently from the navigation system.
+
+### 17.6 Plugin Dependency
+
+RMC is not an Epic-shipped plugin. Engine minor version upgrades (5.5 → 5.7) may lag RMC
+release support — verify compatibility before committing to an engine upgrade. The free
+RMC Core version covers all terrain needs described here; the Pro spatial-loading system
+is not required for this use case.
+
 ---
 
 ## Key Constraints (Tile/World Domain)
@@ -452,7 +597,8 @@ Units overlap freely; no reservation or avoidance system.
 - **Elevation is an integer in height units.** Multiply by `World.heightScalar` for world-
   unit height. There is no float precision concern at the tile level.
 - **Only buildings block tiles.** `TileInstance.occupantId` is only ever set by a building
-  actor. Units never set it and never block pathfinding.
+  actor. Units never set it and never block pathfinding. A tile with `archPassable: true`
+  is ground-passable despite having an occupant (e.g. gatehouse arch tiles).
 - **Cluster boundaries use one entry point per contiguous passable run.** This is the
   standard HPA* approximation. All inter-cluster pathfinding passes through entry points.
 - **Path requests are queued and prioritized.** Priority is caller-set; the recommended
@@ -466,3 +612,16 @@ Units overlap freely; no reservation or avoidance system.
   authored colour map image. Tiles do not change zones mid-session; only ownership changes.
 - **Placement rules are evaluated at placement time only.** Already-placed buildings are
   not re-validated if surrounding world state changes.
+- **Elevated navigation is a sparse second graph, not a full tile layer.** The elevated
+  graph is built only from tiles where wall-type buildings have been placed. It is
+  naturally fragmented into one connected component per disconnected wall chain.
+- **Transition tiles are the only ground↔elevated connection.** Stair and ramp buildings
+  register specific footprint cells as transitions. Units cannot change nav layers except
+  at these tiles.
+- **Wall height is a building property, not a nav property.** Two wall segments at
+  different heights are nav-disconnected unless a stair explicitly bridges them.
+  `wallElevation` is used for visual Z positioning and combat calculations only.
+- **Terrain mesh is visual only.** The RMC terrain mesh carries no physics collision and
+  is not used for unit pathing. Tile elevation data is the authoritative source for all
+  movement calculations. Footprint flattening on building placement is a visual operation
+  only — tile elevation data is not modified.

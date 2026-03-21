@@ -19,6 +19,10 @@ entity's active modifier stack (see [Entities/Workers §13](ENTITIES_WORKERS.md)
 | `name` | `FString` | Display name |
 | `icon` | `TSoftObjectPtr<UTexture2D>` | Visual / map representation |
 | `footprint` | `TArray<TArray<bool>>` | Binary occupancy grid; see §4.1.1 |
+| `createsElevatedSurface` | `bool` | `true` if this building contributes its footprint tiles to the elevated nav graph. Default `false`. See §4.1.2. |
+| `wallElevation` | `int32` | Height of the elevated walkable surface in height units above the tile's base `elevation`. Used for unit visual Z positioning and attack calculations. Only relevant when `createsElevatedSurface: true`. Default `0`. |
+| `archPassableCells` | `TArray<FIntPoint>` | Footprint cells `(row, col)` that are owned by this building but remain ground-passable (e.g. gatehouse arch tiles). Sets `TileInstance.archPassable = true` on placement. Default empty. See §4.1.2. |
+| `elevatedTransitionCells` | `TArray<FIntPoint>` | Footprint cells that act as ground↔elevated nav transitions (stairs, ramps). Each entry registers an `FNavTransition` at placement. Default empty. See §4.1.2. |
 | `tags` | `TArray<FName>` | Arbitrary classification labels |
 
 #### 4.1.1 Footprint Grid
@@ -50,6 +54,63 @@ building. The building's logical origin tile is always `footprint[0][0]`'s world
 
 Rotation (0°, 90°, 180°, 270°) transforms the grid at placement time. The rotated grid
 is computed from the Definition grid and stored on the Building Actor instance.
+
+#### 4.1.2 Elevated Surface Properties
+
+Buildings that form wall tops, towers, or gatehouses declare elevated surface properties
+via the fields in §4.1. These work together as follows:
+
+**`createsElevatedSurface`** — when `true`, all `footprint[row][col] == true` cells are
+registered into the elevated nav graph (`FElevatedNavGraph`) on placement. The tiles join
+an existing adjacent elevated component or form a new one. On demolition, tiles are removed
+and affected components are flood-filled for connectivity.
+
+**`wallElevation`** — the height of the elevated walkable surface, in the same height units
+as `TileInstance.elevation`. A unit standing on an elevated tile computes its visual Z as:
+```
+visualZ = (tile.elevation + buildingDef.wallElevation) * World.heightScalar
+```
+This value is also used by the combat system for elevation-advantage calculations.
+
+**`archPassableCells`** — a list of footprint cells `(row, col)` that the building owns
+(sets `TileInstance.occupantId`) but does not block at ground level. On placement the
+system sets `TileInstance.archPassable = true` for each listed cell; on demolition it is
+cleared. These cells are included in `createsElevatedSurface` tile registration if that
+flag is also true.
+
+Example — a 3×3 gatehouse where the central column is the arch passage:
+```
+footprint:           archPassableCells:   createsElevatedSurface: true
+[ T  T  T ]         [ (0,1), (1,1),      wallElevation: 4
+[ T  T  T ]           (2,1) ]
+[ T  T  T ]
+```
+Ground units path through the three center tiles freely. Wall units path across all nine
+tiles at elevation. Stair buildings placed adjacent to the gatehouse register
+`elevatedTransitionCells` to connect the wall-top to ground.
+
+**`elevatedTransitionCells`** — footprint cells that serve as ground↔elevated crossing
+points (stairs, ramps, ladders). Each listed cell `(row, col)` registers an
+`FNavTransition` linking the ground-layer tile to the elevated tile at `wallElevation`.
+The transition cost is a designer-set value on the building definition.
+
+```
+FTransitionCellEntry {
+  FootprintCell:  FIntPoint    // (row, col) within the footprint
+  TransitionCost: float        // cost added when a unit changes nav layers here
+}
+```
+
+`elevatedTransitionCells` is the sole mechanism by which units change between the ground
+graph and an elevated component. A wall chain with no reachable transition tile is
+inaccessible to ground units.
+
+**Stair height rules** — which stair types can bridge which height differences is enforced
+at placement time via placement rules (§4.4). A stair building definition declares its
+`maxBridgeableElevation` attribute; placement is rejected if the elevation difference
+between the adjacent ground tile and the target wall's `wallElevation` exceeds this value.
+This prevents a single-step stair from connecting to a tall tower without intermediate
+stair sections.
 
 ### 4.2 Attributes
 
