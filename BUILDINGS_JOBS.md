@@ -178,36 +178,44 @@ operation. Constructor units (`canConstruct: true`) are released when `BUILDING_
 
 ### 4.4 Placement Rules
 
+Placement validation logic is implemented as **Blueprint subclasses of `UPlacementRule`**,
+not as string expressions. Building Definitions carry an array of class references; the
+engine instantiates each class and calls `EvaluateTile` per occupied footprint cell.
+
 ```
-PlacementRule {
-  script: <expression>
-  // Script context:
-  //   cells           — array of occupied TileInstances (footprint true-cells only)
-  //   cell.elevation  — elevation of this cell
-  //   cell.neighbors  — array of 4 or 8 adjacent TileInstances
-  //   building        — the Building Definition being placed
-  //   zone            — the Zone Instance for this cell, if any
-  // Must return: bool
-}
+// BuildingDefinition field:
+PlacementRules:  TArray<TSubclassOf<UPlacementRule>>
+
+// UCLASS(Abstract, Blueprintable) — UObject subclass.
+// Create a Blueprint subclass in the Content Browser; add the class to
+// BuildingDefinition.PlacementRules.
+//
+// UFUNCTION(BlueprintNativeEvent)
+// bool EvaluateTile(
+//     const FTileInstance&      Tile,         // the occupied footprint cell being checked
+//     const TArray<FTileInstance>& Neighbors, // 4 or 8 adjacent tiles
+//     const TArray<FTileInstance>& AllCells,  // all occupied footprint cells (for aggregate checks)
+//     UBuildingDefinition*      BuildingDef,
+//     const FZoneInstance*      Zone          // null if unclaimed
+// ) const;
 ```
 
-The script is evaluated once per occupied footprint cell. Placement is rejected if the
-script returns `false` for any cell. The script may also aggregate across all cells
-(e.g. "max elevation delta across all occupied cells must be <= 1") by iterating the
-`cells` array.
+`EvaluateTile` is called once per occupied footprint cell. Placement is rejected if **any**
+call returns `false`. Multiple rules compose as AND. `AllCells` is provided so a single
+rule can implement aggregate constraints (e.g. "max elevation delta across all occupied
+cells ≤ 1") without iterating tiles outside the Blueprint.
 
-**Placement is additionally blocked by the following hard gates, independent of the script:**
+**Hard gates enforced before any `UPlacementRule` is called:**
 
 | Gate | Condition |
 |---|---|
-| Tile occupied | Any `true` footprint cell maps to a tile where `occupantId != null` |
+| Tile occupied | Any `true` footprint cell has `occupantId != null` |
 | Zone ownership | Any occupied cell's `zoneId` belongs to a zone not owned by the placing player |
-| Building prohibited | Any occupied cell's `allowedForBuilding == false` *and* the placement rule script does not explicitly return `true` for that cell |
+| Building prohibited | Any occupied cell has `allowedForBuilding == false` |
 
-The placement rule script may override the `allowedForBuilding` gate — a building designed
-to be placed on water, for example, can include `tile.allowedForBuilding == false` and still
-pass by returning `true` from its script. The tile-occupied and zone-ownership gates are
-always enforced and cannot be overridden by script.
+A `UPlacementRule` override cannot bypass the tile-occupied or zone-ownership gates. It
+**can** override `allowedForBuilding` — a building intended for water placement creates a
+rule that returns `true` for tiles with `allowedForBuilding == false`.
 
 ### 4.5 Access Points
 
@@ -303,22 +311,34 @@ FWorkTaskDefinition {
 
 ```
 FTaskConcurrencyRules {
-  SelfConcurrency:  "none" | "unlimited" | int32    // UENUM + optional count
-  CrossTaskMode:    "exclusive" | "open" | "script"  // UENUM
-  CrossTaskScript:  FString    // Blueprint-callable expression when CrossTaskMode = "script";
-                               // receives: thisTask, candidateTask → returns bool (can coexist)
+  SelfConcurrency:         "none" | "unlimited" | int32    // UENUM + optional count
+  CrossTaskMode:           "exclusive" | "open" | "custom"  // UENUM
+  CompatibilityRuleClass:  TSubclassOf<UTaskCompatibilityRule>
+                           // Required when CrossTaskMode = "custom"; ignored otherwise.
 }
 ```
 
-**`crossTaskMode` values:**
+**`CrossTaskMode` values:**
 - `"exclusive"` — this task cannot run alongside any other task on the same building.
   Construction tasks use this.
 - `"open"` — no restriction; this task may run alongside any other task.
-- `"script"` — a script expression determines compatibility. The script receives the running
-  task and a candidate task as context and returns `true` (can coexist) or `false` (blocked).
-  This replaces the former `"whitelist"` / `"blacklist"` enum values with a more expressive
-  option: whitelist logic is `candidateTask.id in ["taskA", "taskB"]`, blacklist logic is
-  `candidateTask.id not in ["taskC"]`.
+- `"custom"` — compatibility is determined by a `UTaskCompatibilityRule` Blueprint subclass.
+
+```
+// UCLASS(Abstract, Blueprintable) — UObject subclass.
+// Create a Blueprint subclass; assign the class to FTaskConcurrencyRules.CompatibilityRuleClass.
+//
+// UFUNCTION(BlueprintNativeEvent)
+// bool CanCoexist(
+//     const FTaskInstanceControl& ThisTask,
+//     const FTaskInstanceControl& CandidateTask
+// ) const;
+//
+// Return true if the two tasks may run concurrently. Whitelist pattern:
+//   return CandidateTask.TaskDefId == "task_a" || CandidateTask.TaskDefId == "task_b"
+// Blacklist pattern:
+//   return CandidateTask.TaskDefId != "task_c"
+```
 
 **Conflict resolution:**
 1. Check this task's `crossTaskMode` against the candidate task.
@@ -685,6 +705,7 @@ FEventFilter {
 | `GRANT_ABILITY` | Grants an ability to a specific unit or building actor | `abilityDefId`, `targetEntityId` |
 | `SET_FACTION_STANCE` | Changes the relationship stance between two factions | `factionId`, `targetFactionId`, `stance: "friendly" \| "neutral" \| "hostile"` |
 | `APPLY_TECH` | Applies a technology | `techDefId`, `ownerId` |
+| `GRANT_SKILL_XP` | Awards skill XP directly to a unit actor | `skillId`, `xpAmount: float`, `target: entityId \| "attacker"` — `"attacker"` resolves to the payload's `attackerId` field; only valid in hooks that carry an attacker (e.g. `on_unit_death`, `on_unit_damaged`, `on_building_damaged`) |
 | `EMIT_LOG` | Writes to simulation log | `message: string` |
 
 **Event loop note:** `FIRE_EVENT` can trigger another `FIRE_EVENT`, creating a chain. There

@@ -100,6 +100,57 @@ types. **Definitions** inherit from `UPrimaryDataAsset`.
 
 ---
 
+## C++ and Blueprint Architecture
+
+Bastion draws a hard line between what lives in C++ and what lives in Blueprint. The
+guiding rule: **C++ owns structure and performance; Blueprint owns logic and authoring.**
+
+### C++ layer
+- All core simulation structs (`FUnitState`, `FTileInstance`, `FModifier`, etc.)
+- All `UPrimaryDataAsset` definition base classes with their field declarations
+- All `UInterface` capability contracts (`IDamageable`, `IModifiable`, etc.)
+- `AUnitManagerActor`, `ABuildingActor`, `AWorldObjectActor`, `ARealtimeMeshActor`
+- The simulation tick, HPA* pathfinding, spatial grid, modifier stack evaluation
+- `FFastArraySerializer` replication logic
+- All `UENUM(BlueprintType)` values
+- `UBlueprintFunctionLibrary` subclasses exposing simulation queries to Blueprint
+  (e.g. `UBastionQueryLibrary::GetEffectiveAttribute`, `GetUnitsInRadius`)
+
+### Blueprint layer
+All **designer-authored logic** is Blueprint. Where the documentation says "scripted
+logic", this always means a **Blueprint subclass of a C++ base class** with a
+`BlueprintNativeEvent` override. There is no embedded scripting language, no Lua,
+and no string-eval expressions. Specific patterns:
+
+| Logic type | C++ base | Blueprint role |
+|---|---|---|
+| Building placement validation | `UPlacementRule` | Override `EvaluateTile` |
+| Task concurrency compatibility | `UTaskCompatibilityRule` | Override `CanCoexist` |
+| Ability autocast condition | `UAbilityAutocastCondition` | Override `ShouldAutocast` |
+| World object timer behaviour | `UWorldObjectTimerScript` | Override `OnFire` |
+| Damage formula override | `UDamageCalculation` | Override `Calculate` |
+
+Each of these base classes is `UCLASS(Abstract, Blueprintable)`. Designers create
+Blueprint subclasses in the Content Browser and reference them by class reference
+(`TSubclassOf<T>`) on the relevant `UPrimaryDataAsset` Definition.
+
+### Data assets vs DataTables
+**`UPrimaryDataAsset` subclasses** (via Blueprint instances in the Content Browser)
+are the primary authoring format for all Definitions. They support asset references
+(skeletal meshes, textures, sounds, class references) that CSV/JSON cannot express.
+
+**`UDataTable`** (importable from CSV or JSON) is an option for pure-numeric tabular
+data where external spreadsheet editing is valuable — for example, a stat-tuning pass
+on unit base attributes or resource quantity thresholds. DataTable rows must map to a
+`USTRUCT` with no asset references. They supplement DataAssets; they do not replace
+them. Any definition field that references a Blueprint class, a skeletal mesh, or an
+animation asset must remain in a DataAsset, not a DataTable.
+
+There is no runtime JSON loader for game definitions. JSON import is a content-pipeline
+tool only (DataTable import in the editor).
+
+---
+
 ## 0. Entity Interfaces
 
 Rather than a single monolithic base, Bastion defines a set of composable interfaces. Each

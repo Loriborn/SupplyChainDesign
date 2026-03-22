@@ -597,13 +597,17 @@ FAbilityDefinition {
   TargetConstraint:  FAbilityTargetConstraint
 
   // Activation
-  Cooldown:          float              // seconds between uses; 0 = no cooldown
-  ResourceCosts:     TArray<FAbilityCost>
-  bAutocast:         bool
-  AutoCondition:     FAbilityScript     // evaluated each tick when bAutocast=true
+  Cooldown:                 float                              // seconds between uses; 0 = no cooldown
+  ResourceCosts:            TArray<FAbilityCost>
+  bAutocast:                bool
+  AutocastConditionClass:   TSubclassOf<UAbilityAutocastCondition>
+                            // Optional (null = autocast whenever TargetConstraint is satisfied
+                            // and cooldown has elapsed). Assign a Blueprint subclass of
+                            // UAbilityAutocastCondition for conditional logic (e.g. "only when
+                            // caster health < 50%"). See UAbilityAutocastCondition below.
 
   // Effect
-  Effects:           TArray<FAbilityEffect>
+  Effects:                  TArray<FAbilityEffect>
 }
 ```
 
@@ -638,6 +642,21 @@ FAbilityCost {
 
 If the caster does not have sufficient attribute value, the ability cannot be activated.
 
+#### UAbilityAutocastCondition
+
+```
+// UCLASS(Abstract, Blueprintable) — UObject subclass.
+// Create a Blueprint subclass in the Content Browser; assign the class reference to
+// AbilityDefinition.AutocastConditionClass.
+//
+// UFUNCTION(BlueprintNativeEvent)
+// bool ShouldAutocast(FName CasterUnitId, FName AbilityDefId) const;
+//
+// Called each tick when bAutocast = true. Return true to permit autocast firing
+// (subject to cooldown and ResourceCosts). The TargetConstraint check runs first;
+// ShouldAutocast is only called if a valid target already exists.
+```
+
 #### AbilityEffect
 
 ```
@@ -655,7 +674,9 @@ FAbilityEffect {
   ScaleFactor:         float        // multiplier on DamageScalesWith value; default 1.0
   DamageType:          FName        // designer-defined type tag (e.g. "slash", "magic");
                                     // NAME_None = skip type-resistance lookup
-  DamageFormulaId:     FName        // FDamageFormulaDefinition id (§20.3); NAME_None = base formula
+  DamageFormulaId:     FName        // references a UDamageCalculation Blueprint asset (§20.3);
+                                    // NAME_None = use base formula
+  SkillGrants:         TArray<FAbilitySkillGrant>  // combat veterancy XP; see §21
 
   // for apply_modifier:
   ModifierTemplate:    TOptional<FModifierTemplate>
@@ -677,6 +698,28 @@ FAbilityEffect {
   Destination:         TOptional<FIntPoint>
 }
 ```
+
+#### FAbilitySkillGrant
+
+Awarded to the **caster** when the `deal_damage` effect fires. Supports combat veterancy
+patterns (soldiers levelling up from fighting).
+
+```
+FAbilitySkillGrant {
+  SkillId:   FName
+  XPAmount:  float
+  Trigger:   EAbilitySkillGrantTrigger    // UENUM
+}
+
+// UENUM(BlueprintType)
+EAbilitySkillGrantTrigger:
+  OnHit    // XP granted on any successful damage application (including overkill)
+  OnKill   // XP granted only when this effect reduces the target's health to 0
+```
+
+Multiple `FAbilitySkillGrant` entries may be declared on a single effect and are each
+applied independently. XP is awarded before the level-up check fires (see §21.3), so a
+single kill can trigger a level-up in the same tick.
 
 ### 18.2 Auto-Attack as an Ability
 
@@ -775,31 +818,31 @@ to the remainder. Negative resistance (vulnerability) amplifies damage up to 2×
 
 ### 20.3 Custom Damage Formulas
 
-Abilities that need different calculation logic declare a `DamageFormulaId` referencing a
-`FDamageFormulaDefinition` — a Blueprint-overridable `UDamageCalculation` UObject asset.
-The engine calls the asset's `Calculate` function in place of the base formula.
+Abilities that need different calculation logic set `DamageFormulaId` to the `Id` of a
+`UDamageCalculation` Blueprint asset. The engine instantiates the class and calls
+`Calculate` in place of the base formula.
 
 ```
-FDamageFormulaDefinition {
-  Id:          FName
-  Description: FString
-  // Blueprint override point:
-  //   float Calculate(FDamageCalculationContext ctx)
-}
+// UCLASS(Abstract, Blueprintable) — UObject subclass.
+// Create a Blueprint subclass in the Content Browser; give it an Id; reference that Id
+// in AbilityEffect.DamageFormulaId.
+//
+// UFUNCTION(BlueprintNativeEvent)
+// float Calculate(FDamageCalculationContext Context) const;
 
 FDamageCalculationContext {
   AttackerId:    FName
   TargetId:      FName
   AbilityDefId:  FName
   DamageType:    FName
-  RawDamage:     float    // pre-computed from DamageAmount + scale; provided for convenience
-  // Caller may invoke getEffectiveAttribute(AttackerId/TargetId, ...) freely
+  RawDamage:     float    // pre-computed from DamageAmount + scale; convenience value
+  // UBastionQueryLibrary::GetEffectiveAttribute is available inside Blueprint
 }
 ```
 
-The return value is applied directly as final damage — **no armour or resistance is applied
-automatically** when a custom formula is active. The formula is responsible for any defensive
-calculations it wishes to include.
+`Calculate` returns the final damage applied directly — **no armour or resistance is
+applied automatically** when a custom formula is active. The Blueprint override is
+responsible for all defensive calculations it wants to include.
 
 **Common override patterns:**
 
