@@ -166,13 +166,29 @@ FAttributeDeclaration {
 At minimum every Unit Type Definition declares: `maxHealth`, `armour`, `movementSpeed`,
 `attackDamage`, `attackRange`, `attackSpeed`.
 
-### 6.3 Construction
+### 6.3 Skills
+
+A unit type declares which skills it can develop via veterancy. See §21 for the full Skill
+System specification.
+
+```
+FUnitTypeSkillDeclaration {
+  SkillId:      FName    // references a FSkillDefinition
+  InitialLevel: int32    // level at spawn; default 0
+}
+```
+
+`Skills: TArray<FUnitTypeSkillDeclaration>` on the unit type definition. At spawn, the
+unit's custom attribute set is initialized with `XPAttributeId: 0.0` and
+`LevelAttributeId: InitialLevel` for each declared skill.
+
+### 6.4 Construction
 
 | Field | Type | Description |
 |---|---|---|
 | `canConstruct` | `bool` | Whether this unit type may execute Construction Tasks |
 
-### 6.4 Combat Flags & Target Selection
+### 6.5 Combat Flags & Target Selection
 
 Combat behavior is declared as boolean flags. Numeric combat values are handled through
 the attribute system (§13).
@@ -181,7 +197,7 @@ the attribute system (§13).
 |---|---|---|
 | `controllable` | `bool` | Player may issue direct move/attack commands |
 | `fightsBack` | `bool` | Retaliates when attacked. Unit auto-casts its default attack ability on its attacker when struck, if not already in combat. |
-| `autoEngages` | `bool` | Automatically attacks nearby enemies without a command. "Nearby" is defined as within the unit's effective `attackRange`. "Enemy" is any unit or building whose `ownerId` belongs to a faction with a hostile relationship to this unit's faction (see §6.9). |
+| `autoEngages` | `bool` | Automatically attacks nearby enemies without a command. "Nearby" is defined as within the unit's effective `attackRange`. "Enemy" is any unit or building whose `ownerId` belongs to a faction with a hostile relationship to this unit's faction (see §6.10). |
 | `targetSelectionPolicy` | `TargetSelectionPolicy` | Controls which enemy the unit selects when `autoEngages` or `fightsBack` is active. See below. |
 
 #### TargetSelectionPolicy
@@ -201,7 +217,7 @@ replace the policy rather than stacking — the most recently applied modifier w
 
 Default: `"nearest"` if not specified on the Unit Type Definition.
 
-### 6.5 Inventory Slots
+### 6.6 Inventory Slots
 
 A unit's carry capacity is defined by the **number of inventory slots** declared on its
 Unit Type Definition. Each slot is generic — it holds any one resource type up to that
@@ -224,7 +240,7 @@ Carry capacity is not an attribute modifier target. Adding inventory slots via a
 not supported; slot count is fixed by the unit type definition. Designers who need variable
 carry capacity should design separate unit types.
 
-### 6.6 Equipment Slot Declarations
+### 6.7 Equipment Slot Declarations
 
 Units declare named equipment slots that equippable resources may be placed into.
 
@@ -236,7 +252,7 @@ FEquipmentSlotDeclaration {
 }
 ```
 
-### 6.7 Behavioral Notes
+### 6.8 Behavioral Notes
 
 The following are illustrative examples of how Unit Type Definition fields compose to
 produce different unit roles. They are not authoritative archetypes — designers are free
@@ -257,7 +273,7 @@ work tasks. Any unit type with `controllable: true` may be directly commanded by
 player. The distinction between "worker" and "combat unit" exists only in how the designer
 configures the definition, not in any structural difference in the data model.
 
-### 6.8 Predefined Abilities
+### 6.9 Predefined Abilities
 
 A unit type declares zero or more ability references in its definition. These are the
 abilities the unit has when spawned, before any equipment or tech grants are applied.
@@ -268,9 +284,9 @@ FUnitTypeAbilityRef {
 }
 ```
 
-Abilities are a first-class definition type. See §17 for the full `AbilityDefinition` spec.
+Abilities are a first-class definition type. See §18 for the full `AbilityDefinition` spec.
 
-### 6.9 Faction / Ownership Model
+### 6.10 Faction / Ownership Model
 
 Every unit and building actor has an `ownerId` that references a `PlayerDefinition`.
 Every player belongs to exactly one faction. Faction membership determines the "enemy"
@@ -447,7 +463,7 @@ Definitions with their base values.
 | `movementSpeed` | Units | World units per second | 0.0 (unit stops moving if reduced to 0) |
 | `attackDamage` | Units | Damage per attack | 0.0 |
 | `attackRange` | Units | Attack range in tiles | 0.0 |
-| `attackSpeed` | Units | Attacks per second (governs default attack ability cooldown — see §17) | 0.0 |
+| `attackSpeed` | Units | Attacks per second (governs default attack ability cooldown — see §18) | 0.0 |
 
 **Floor enforcement:** After composing base value + modifier stack, if the result is below
 the attribute's floor, the effective value is clamped to the floor. The floor applies to the
@@ -555,7 +571,7 @@ separate task-management path at the equipment layer.
 
 ---
 
-## 17. Abilities
+## 18. Abilities
 
 Abilities are player-invoked or auto-triggered active actions that units and buildings can
 perform. They are the mechanism for all direct combat interactions, targeted support actions,
@@ -566,7 +582,7 @@ not part of the macro economy system and do not interact with inventory steps.
 building, clicks an ability button, selects a target (unit, building, tile, or area), and
 the effect fires. Abilities range from direct damage to buffs to AoE effects.
 
-### 17.1 AbilityDefinition
+### 18.1 AbilityDefinition
 
 ```
 FAbilityDefinition {
@@ -633,9 +649,13 @@ FAbilityEffect {
       | "heal"
       | "teleport_to_tile"    // UENUM
 
-  // for deal_damage:
-  DamageAmount:        float        // base damage before armour; 0.0f = scale only
-  DamageScalesWith:    FName        // attribute id on caster; NAME_None = flat amount only
+  // for deal_damage (see §20 for formula and damage type details):
+  DamageAmount:        float        // base damage before defences; 0.0f = use scale only
+  DamageScalesWith:    FName        // attribute id on caster to scale damage; NAME_None = flat only
+  ScaleFactor:         float        // multiplier on DamageScalesWith value; default 1.0
+  DamageType:          FName        // designer-defined type tag (e.g. "slash", "magic");
+                                    // NAME_None = skip type-resistance lookup
+  DamageFormulaId:     FName        // FDamageFormulaDefinition id (§20.3); NAME_None = base formula
 
   // for apply_modifier:
   ModifierTemplate:    TOptional<FModifierTemplate>
@@ -658,7 +678,7 @@ FAbilityEffect {
 }
 ```
 
-### 17.2 Auto-Attack as an Ability
+### 18.2 Auto-Attack as an Ability
 
 There is no separate generic attack mechanism. All attacks — including basic auto-attacks —
 are abilities. Each unit type that can fight declares an **auto-attack ability**:
@@ -683,7 +703,7 @@ The `attackSpeed` attribute governs the cooldown of the unit's auto-attack abili
 auto-casts its default attack ability on the selected target (using `targetSelectionPolicy`).
 A unit with `fightsBack: true` auto-casts it specifically on its attacker.
 
-### 17.3 Ability Grants
+### 18.3 Ability Grants
 
 Units may gain additional abilities beyond their type definition through:
 - **Equipment:** A resource's `ModifierTemplate` may reference an ability id to grant.
@@ -696,12 +716,237 @@ Units may gain additional abilities beyond their type definition through:
 Granted abilities are tracked on `UnitActor.grantedAbilities: string[]` (ability def ids).
 The unit's full ability set is `UnitTypeDefinition.abilities ∪ grantedAbilities`.
 
-### 17.4 Building Abilities
+### 18.4 Building Abilities
 
 Buildings may also declare abilities in their `BuildingDefinition`. Building abilities
 follow the same `AbilityDefinition` structure. A tower that fires a special player-triggered
 shot, or a shrine that casts a zone-wide buff, are both building abilities. Building abilities
 are activated by player command (or autocast if configured).
+
+---
+
+## 20. Combat & Damage Types
+
+### 20.1 Damage Types
+
+Damage types are designer-defined `FName` identifiers (e.g. `"slash"`, `"pierce"`,
+`"blunt"`, `"fire"`, `"magic"`, `"siege"`). They are not an enum — designers declare
+whatever types their game requires. Each `AbilityEffect` of type `"deal_damage"` declares
+a `DamageType` (§18.1).
+
+A target entity's resistance to a damage type is a **custom attribute** (§13.2) following
+the naming convention `"resist_<damageType>"`. Examples:
+
+| Attribute | Effect |
+|---|---|
+| `resist_slash: 0.25` | 25% damage reduction from slashing attacks |
+| `resist_magic: 0.5` | 50% reduction from magical damage |
+| `resist_siege: -0.5` | 50% increased vulnerability to siege damage |
+
+Resistances are declared on unit type definitions and are normal modifier targets —
+equipment, techs, and applied ability effects can alter them at runtime.
+
+If no `resist_<damageType>` attribute exists on a target, resistance defaults to `0.0`
+(no effect). This means newly added damage types are automatically neutral against units
+that haven't declared resistance, requiring no changes to existing unit definitions.
+
+### 20.2 Base Damage Formula
+
+Applied when `AbilityEffect.DamageFormulaId` is `NAME_None`:
+
+```
+// 1. Raw damage (before defences)
+rawDamage = effect.DamageAmount
+          + getEffectiveAttribute(attacker, effect.DamageScalesWith) * effect.ScaleFactor
+
+// 2. Flat soak (armour)
+armourSoak   = max(0, getEffectiveAttribute(target, "armour"))
+soakedDamage = max(0, rawDamage - armourSoak)
+
+// 3. Type resistance (proportional; clamp prevents >100% or >200% damage)
+resistance  = getEffectiveAttribute(target, "resist_" + effect.DamageType, default=0.0)
+finalDamage = soakedDamage * (1.0 - clamp(resistance, -1.0, 1.0))
+
+target.currentHealth -= max(0, finalDamage)
+```
+
+`armour` provides flat absorption applied first. Type resistance then applies proportionally
+to the remainder. Negative resistance (vulnerability) amplifies damage up to 2× at `−1.0`.
+
+### 20.3 Custom Damage Formulas
+
+Abilities that need different calculation logic declare a `DamageFormulaId` referencing a
+`FDamageFormulaDefinition` — a Blueprint-overridable `UDamageCalculation` UObject asset.
+The engine calls the asset's `Calculate` function in place of the base formula.
+
+```
+FDamageFormulaDefinition {
+  Id:          FName
+  Description: FString
+  // Blueprint override point:
+  //   float Calculate(FDamageCalculationContext ctx)
+}
+
+FDamageCalculationContext {
+  AttackerId:    FName
+  TargetId:      FName
+  AbilityDefId:  FName
+  DamageType:    FName
+  RawDamage:     float    // pre-computed from DamageAmount + scale; provided for convenience
+  // Caller may invoke getEffectiveAttribute(AttackerId/TargetId, ...) freely
+}
+```
+
+The return value is applied directly as final damage — **no armour or resistance is applied
+automatically** when a custom formula is active. The formula is responsible for any defensive
+calculations it wishes to include.
+
+**Common override patterns:**
+
+| Pattern | Description |
+|---|---|
+| Siege weapon | Bypasses armour against buildings; applies armour normally against units |
+| Magic bypass | Skips `armour`; applies only `resist_magic` |
+| % health damage | `return target.currentHealth * 0.25` — ignores all flat defences |
+| Armour-piercing | Subtracts only a fraction of full armour: `soaked = rawDamage - (armour * 0.5)` |
+
+### 20.4 Armour Convention
+
+`armour` is a core attribute (§13.1), floor `0.0`. Suggested baseline values:
+
+| Tier | Example units | `armour` range |
+|---|---|---|
+| Unarmoured | Farmers, monks, peasants | 0 |
+| Light | Archers, militia | 5–15 |
+| Medium | Men-at-arms, sergeants | 20–40 |
+| Heavy | Knights, halberdiers | 50–80 |
+| Fortified | Siege engines, towers | 100–300 |
+
+These are authoring guidelines, not enforced ranges. A heavily armoured unit that fully
+absorbs a weak weapon's damage is working as intended — designers tune `attackDamage` and
+`armour` values together to achieve the desired matchup results.
+
+---
+
+## 21. Skill System (Veterancy)
+
+Units improve at specific jobs by performing them. Each **skill** tracks experience points
+(XP) and a level derived from XP thresholds. Skill levels influence task step output and
+unlock ability preconditions — they are designer-referenced, not hardcoded effects.
+
+### 21.1 Skill Definition
+
+```
+FSkillDefinition {
+  Id:               FName            // e.g. "fletching", "swordplay", "farming"
+  DisplayName:      FString
+  XPAttributeId:    FName            // convention: Id + "XP" → "fletchingXP"
+  LevelAttributeId: FName            // convention: Id + "Level" → "fletchingLevel"
+  LevelThresholds:  TArray<float>    // XP required to reach each successive level;
+                                     // index 0 → level 1, index 1 → level 2, ...
+  MaxLevel:         int32
+  LevelTags:        TArray<FSkillLevelTag>
+}
+
+FSkillLevelTag {
+  Level: int32    // level at which this tag is granted (retained at all higher levels)
+  Tag:   FName
+}
+```
+
+`SkillDefinition` assets are authored globally alongside `TileDefinition` and
+`ResourceDefinition`. Skill XP and Level are represented as custom attributes on the unit
+(§13.2) and participate in the full modifier stack — equipment and techs may grant bonus
+levels or XP multipliers via standard `FModifier` entries.
+
+### 21.2 Unit Type Skill Declarations
+
+See §6.3. At spawn, the unit's attribute set is initialized with `XPAttributeId: 0.0` and
+`LevelAttributeId: InitialLevel` for each declared skill.
+
+### 21.3 XP Grants on Step Completion
+
+`FWorkStepDefinition` carries `SkillGrants` (see [Buildings/Jobs §5.3](BUILDINGS_JOBS.md)).
+XP is added to the executing unit's `XPAttributeId` when the step **completes**. Cancelled
+or interrupted steps grant no XP.
+
+**Level-up processing (same tick as XP grant):**
+
+1. If new XP total ≥ `LevelThresholds[currentLevel]`: increment `LevelAttributeId`, subtract
+   the threshold (leaving excess XP carried forward), repeat for the next threshold.
+2. Apply any `LevelTags` for levels reached by instantiating a permanent `FModifier`
+   (`duration: -1.0`, `grantsTag: tag`, `sourceId: "<skillId>_level<N>"`).
+3. Fire `on_skill_level_up` event hook.
+
+### 21.4 Skill-Scaled Step Output
+
+`GENERATE_RESOURCE` and `TRANSFORM_RESOURCE` step vars support an optional `OutputScaling`
+field (see [Buildings/Jobs §5.5](BUILDINGS_JOBS.md)):
+
+```
+FSkillScaling {
+  SkillId:        FName
+  BaseMultiplier: float    // multiplier at level 0 (e.g. 1.0)
+  PerLevelBonus:  float    // additive bonus per level (e.g. 0.1 = +10% per level)
+}
+// effectiveMultiplier = BaseMultiplier + (currentLevel × PerLevelBonus)
+// output quantity      = floor(declaredQuantity × effectiveMultiplier)
+```
+
+### 21.5 Skill Preconditions
+
+`FStepPrecondition` type `"skill_min_level"` (see [Buildings/Jobs §5.4](BUILDINGS_JOBS.md))
+enables steps that require a minimum skill level to execute — "master-tier recipe" patterns.
+
+### 21.6 Tag Integration
+
+`LevelTags` integrate fully with the existing tag system. Tags granted by skill level appear
+in `hasEntityTag` queries and are usable everywhere tags are consumed:
+
+- `WorkerRequirement.TagRequirements` — "this step requires a MASTER_FLETCHER"
+- `AbilityTargetConstraint.RequiredTags` — "this ability only targets VETERAN units"
+- `EventFilter` — "fire this event only when a MASTER unit dies"
+
+Tags granted by skill are permanent for the session and append-only — levels and XP only
+increase. There is no level-loss mechanic.
+
+### 21.7 Example — Fletcher Veterancy
+
+```
+// Skill Definition
+FSkillDefinition {
+  id:               "fletching"
+  xpAttributeId:    "fletchingXP"
+  levelAttributeId: "fletchingLevel"
+  levelThresholds:  [100.0, 300.0, 700.0, 1500.0]    // 4 levels
+  maxLevel:         4
+  levelTags: [
+    { level: 2, tag: "JOURNEYMAN_FLETCHER" },
+    { level: 4, tag: "MASTER_FLETCHER"     }
+  ]
+}
+
+// Unit Type Definition (excerpt)
+UnitTypeDefinition {
+  id:     "fletcher"
+  skills: [ { skillId: "fletching", initialLevel: 0 } ]
+}
+
+// Work Step — Fletch Arrows (in Fletcher Workshop building)
+FWorkStepDefinition {
+  id:           "fletch_arrows"
+  type:         TRANSFORM_RESOURCE
+  skillGrants:  [ { skillId: "fletching", xpAmount: 10.0 } ]
+  vars: {
+    inputs:        [ { resourceDefId: "feathers", quantity: 3 },
+                     { resourceDefId: "wood",     quantity: 1 } ],
+    outputs:       [ { resourceDefId: "arrow",    quantity: 5 } ],
+    outputScaling: { skillId: "fletching", baseMultiplier: 1.0, perLevelBonus: 0.2 }
+  }
+}
+// Level 0: 5 arrows. Level 2: floor(5 × 1.4) = 7. Level 4: floor(5 × 1.8) = 9.
+// A "royal longbow" step may additionally gate on tagRequirements: ["MASTER_FLETCHER"].
+```
 
 ---
 
@@ -732,3 +977,14 @@ are activated by player command (or autocast if configured).
 - **Equipment is the sole mechanism for stat and capability modification.** There are no
   separate upgrade or patch structures. All changes — permanent or timed, unit or building —
   flow through the modifier stack and equipment system.
+- **Damage types are designer-defined FNames.** There is no hardcoded damage type enum.
+  Resistances are custom attributes following the `"resist_<type>"` naming convention.
+  The base formula handles armour soak then type resistance; per-ability formula overrides
+  replace the base formula entirely.
+- **Skill levels and XP are custom attributes.** They participate in the full modifier
+  stack — equipment and techs can grant bonus levels. Tags granted by skill level are
+  permanent and append-only. Skill XP grants happen on step completion only.
+- **Building upgrades are demolish-and-replace.** There is no in-place building tier
+  upgrade. Buildings improve within their type via equipment (removable: false) and
+  adjacency bonuses (§23). A tier change requires demolition and placement of a new
+  building definition.

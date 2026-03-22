@@ -23,6 +23,7 @@ entity's active modifier stack (see [Entities/Workers §13](ENTITIES_WORKERS.md)
 | `wallElevation` | `int32` | Height of the elevated walkable surface in height units above the tile's base `elevation`. Used for unit visual Z positioning and attack calculations. Only relevant when `createsElevatedSurface: true`. Default `0`. |
 | `archPassableCells` | `TArray<FIntPoint>` | Footprint cells `(row, col)` that are owned by this building but remain ground-passable (e.g. gatehouse arch tiles). Sets `TileInstance.archPassable = true` on placement. Default empty. See §4.1.2. |
 | `elevatedTransitionCells` | `TArray<FIntPoint>` | Footprint cells that act as ground↔elevated nav transitions (stairs, ramps). Each entry registers an `FNavTransition` at placement. Default empty. See §4.1.2. |
+| `adjacencyBonuses` | `TArray<FAdjacencyBonus>` | Passive modifiers this building receives when qualifying buildings are placed nearby. See §23. Default empty. |
 | `tags` | `TArray<FName>` | Arbitrary classification labels |
 
 #### 4.1.1 Footprint Grid
@@ -339,6 +340,12 @@ FWorkStepDefinition {
   WorkerRequirements: TArray<FWorkerRequirement> // all must be simultaneously present
   Preconditions:     TArray<FStepPrecondition>
   Vars:              FStepVars
+  SkillGrants:       TArray<FSkillGrant>         // XP awarded to executing unit on step completion
+}
+
+FSkillGrant {
+  SkillId:   FName    // references a FSkillDefinition (see Entities/Workers §21)
+  XPAmount:  float    // added to the executing unit's XPAttributeId on completion
 }
 
 FWorkerRequirement {
@@ -385,7 +392,8 @@ reach the building (see §4.5).
 ```
 FStepPrecondition {
   Type:             "inventory_min" | "inventory_max" | "building_state" |
-                    "zone_owned" | "event_flag" | "entity_has_tag" | "resource_has_tag"    // UENUM
+                    "zone_owned" | "event_flag" | "entity_has_tag" | "resource_has_tag" |
+                    "skill_min_level"    // UENUM
   ResourceDefId:    FName        // NAME_None if unused
   Namespace:        "local" | "available"    // UENUM
   Quantity:         int32
@@ -393,6 +401,8 @@ FStepPrecondition {
   RequiredState:    FName        // NAME_None if unused
   FlagId:           FName        // NAME_None if unused
   Tag:              FName        // for entity_has_tag / resource_has_tag types
+  SkillId:          FName        // for skill_min_level type; NAME_None otherwise
+  MinLevel:         int32        // for skill_min_level type
 }
 ```
 
@@ -404,14 +414,15 @@ FStepPrecondition {
 | `zone_owned` | This building's zone is owned by the expected player |
 | `event_flag` | Named world flag is `true` |
 | `entity_has_tag` | This building or the executing unit has the specified tag |
+| `skill_min_level` | The executing unit's `LevelAttributeId` for `SkillId` ≥ `MinLevel` |
 
 ### 5.5 Work Step Types
 
 | Type | Description | Key `vars` |
 |---|---|---|
-| `GENERATE_RESOURCE` | Creates resource into an inventory slot | `resourceDefId`, `quantity`, `destinationNamespace` |
+| `GENERATE_RESOURCE` | Creates resource into an inventory slot | `resourceDefId`, `quantity`, `destinationNamespace`, `outputScaling` (optional) |
 | `CONSUME_RESOURCE` | Removes resource from an inventory slot | `resourceDefId`, `quantity`, `sourceNamespace` |
-| `TRANSFORM_RESOURCE` | Atomically consumes inputs, produces outputs. See §5.5.1. | `inputs[]`, `outputs[]` |
+| `TRANSFORM_RESOURCE` | Atomically consumes inputs, produces outputs. See §5.5.1. | `inputs[]`, `outputs[]`, `outputScaling` (optional, applied to all outputs) |
 | `COLLECT_RESOURCE` | Sends unit to retrieve from external available inventory. See §5.5.2. | `sourceBuildingId`, `resourceDefId`, `quantity`, `destinationNamespace` |
 | `DELIVER_RESOURCE` | Sends unit to deposit to external available inventory | `resourceDefId`, `quantity`, `sourceNamespace`, `destinationBuildingId` |
 | `EQUIP_ITEM` | Places a resource from inventory into an equipment slot | `resourceDefId`, `slotId`, `targetEntityId \| "self"` |
@@ -436,6 +447,26 @@ FTransformEntry {
 The step atomically consumes all `inputs` and produces all `outputs` if and only if all
 input quantities are available. If any input is insufficient, the step blocks in
 `"waiting_on_precondition"` and is retried next tick.
+
+#### 5.5.2a OutputScaling (GENERATE_RESOURCE and TRANSFORM_RESOURCE)
+
+Both step types accept an optional `OutputScaling` field that multiplies the output
+`quantity` by a factor derived from the executing unit's skill level:
+
+```
+FSkillScaling {
+  SkillId:        FName    // references a FSkillDefinition (Entities/Workers §21)
+  BaseMultiplier: float    // multiplier at level 0 (e.g. 1.0)
+  PerLevelBonus:  float    // added per level (e.g. 0.1 = +10% per level)
+}
+// effectiveMultiplier = BaseMultiplier + (currentLevel × PerLevelBonus)
+// final quantity       = floor(declaredQuantity × effectiveMultiplier)
+```
+
+When `OutputScaling` is set on `TRANSFORM_RESOURCE`, the multiplier is applied to every
+entry in `outputs[]` independently. `inputs[]` quantities are not scaled — only output.
+If the executing unit has no declared skill matching `SkillId`, `currentLevel` defaults to
+0 (base multiplier only).
 
 #### 5.5.2 COLLECT_RESOURCE with null sourceBuildingId
 
@@ -611,6 +642,7 @@ are handled by replacing or upgrading the slot declaration via equipment (see [R
 | `on_unit_spawned` | Unit created by a `SPAWN_UNIT` step | `unitActorId`, `unitTypeDefId`, `buildingActorId`, `position` |
 | `on_faction_stance_changed` | Faction relationship stance updated | `factionId`, `targetFactionId`, `newStance` |
 | `on_flag_set` | Named event flag set to `true` | `flagId` |
+| `on_skill_level_up` | Unit's skill level increases | `unitActorId`, `ownerId`, `skillId`, `newLevel` |
 
 ### 10.2 Event Definition
 
@@ -822,6 +854,77 @@ FActiveTech {
 
 ---
 
+## 23. Building Adjacency Bonuses
+
+Buildings receive passive modifiers when certain other buildings are placed nearby.
+Adjacency bonuses are first-class — the engine evaluates and maintains them automatically
+on every placement and demolition event.
+
+### 23.1 Adjacency Bonus Declaration
+
+```
+FAdjacencyBonus {
+  Id:                 FName              // unique within this building definition
+  TriggerBuildingTag: FName              // any building bearing this tag within radius triggers the bonus
+  RadiusTiles:        int32              // Chebyshev distance from nearest occupied footprint cell
+  MaxTriggers:        int32              // max qualifying neighbours contributing; -1 = unlimited
+  ModifierTemplate:   FModifierTemplate  // one copy applied to self per qualifying neighbour
+}
+```
+
+Each qualifying neighbour within radius contributes one copy of `ModifierTemplate` to the
+declaring building, up to `MaxTriggers`. Modifier IDs are synthesised as
+`"adj_" + adjacencyBonusId + "_" + triggerBuildingActorId` — unique per contributing
+building, so each can be individually removed on demolition.
+
+### 23.2 Evaluation Triggers
+
+| Event | What the engine does |
+|---|---|
+| This building placed | Scan all buildings within each `AdjacencyBonus.RadiusTiles`; apply one modifier per qualifying neighbour found |
+| Any other building placed | Check if the new building triggers any adjacency bonuses on nearby existing buildings; apply modifiers to those buildings. Also check if nearby existing buildings trigger this building's own adjacency bonuses |
+| Any building demolished | Remove all bonus modifiers sourced from the demolished building's actor ID; re-evaluate any adjacency bonuses that may have been capped by `MaxTriggers` |
+
+### 23.3 Constraints
+
+- A building's adjacency bonuses cannot trigger on itself (self is excluded from the radius scan).
+- `TriggerBuildingTag` matches Definition-level `tags` only — modifier-granted tags on
+  buildings are not evaluated for adjacency triggering.
+- Radius is **Chebyshev distance** from the nearest `true` footprint cell of each building,
+  not from the origin tile.
+- Adjacency modifiers are ordinary stack entries (§13.3). They appear in
+  `getModifiersForAttribute` queries and are inspectable via `hasModifierFromSource`.
+
+### 23.4 Examples
+
+**Mill cluster** — a granary gains storage capacity for each nearby windmill (up to 3):
+
+```
+FAdjacencyBonus {
+  id:                 "mill_proximity"
+  triggerBuildingTag: "windmill"
+  radiusTiles:        5
+  maxTriggers:        3
+  modifierTemplate: { attributeTarget: "storageCapacity", operation: "additive",
+                      value: 500.0, duration: -1.0 }
+}
+```
+
+**Barracks network** — each nearby barracks speeds up training (unlimited stacking):
+
+```
+FAdjacencyBonus {
+  id:                 "barracks_network"
+  triggerBuildingTag: "barracks"
+  radiusTiles:        8
+  maxTriggers:        -1
+  modifierTemplate: { attributeTarget: "trainingSpeed", operation: "multiplicative",
+                      value: 0.05, duration: -1.0 }
+}
+```
+
+---
+
 ## Key Constraints (Buildings/Jobs Domain)
 
 - **Building footprints are binary grids, not rectangles.** Only `true` cells participate
@@ -847,6 +950,13 @@ FActiveTech {
   prerequisite tech is not already active for the same owner. Prerequisites form a DAG.
 - **Tech revocation is not supported.** Counter a tech's effects by applying an inverting
   tech. The progression is one-way within a session.
+- **Adjacency bonuses are engine-maintained, not event-wired.** The engine evaluates
+  `FAdjacencyBonus` declarations automatically on every placement and demolition. Modifier
+  IDs encode both the bonus and the contributing building, enabling clean removal.
+- **Skill XP is granted on step completion only.** Cancelled or interrupted steps grant
+  no XP. Multiple `FSkillGrant` entries on one step are each applied independently.
+- **OutputScaling applies to output quantities only.** Input requirements in
+  `TRANSFORM_RESOURCE` steps are not scaled by skill level.
 - **Technologies apply to types, not instances.** An `"indefinite"` tech modifier applies
   to all current instances and all future spawns of the target definition. A `"once"` tech
   effect applies only to instances alive at application time.

@@ -587,6 +587,174 @@ is not required for this use case.
 
 ---
 
+## 19. Spatial Unit Index
+
+Unit actors are managed by `AUnitManagerActor` as a flat `TArray<FUnitState>`. At 1000+
+units, naive O(n) scans for proximity queries — auto-engage detection, ability radius
+targeting, adjacency bonus evaluation — are prohibitively expensive. The unit manager
+maintains a **spatial unit grid**: a derived acceleration structure updated incrementally
+as units move. It is not part of canonical `World` state and is neither replicated nor
+persisted.
+
+### 19.1 Grid Structure
+
+```
+// Maintained by AUnitManagerActor. Derived from unit positions; not in World state.
+FSpatialUnitGrid {
+  CellTilesWide:  int32                    // tiles per cell in X; default 1
+  CellTilesHigh:  int32                    // tiles per cell in Y; default 1
+  GridW:          int32                    // = ceil(mapWidth  / CellTilesWide)
+  GridH:          int32                    // = ceil(mapHeight / CellTilesHigh)
+  Cells:          TArray<TArray<FName>>    // [cellY * GridW + cellX] → unit IDs in this cell
+}
+```
+
+With `CellTilesWide = CellTilesHigh = 1` (the default), each cell corresponds to exactly
+one tile. Larger cell sizes reduce per-move update cost at the expense of a slightly wider
+query envelope — tune if unit density per tile is consistently low.
+
+### 19.2 Update Policy
+
+The grid is updated when a unit's **cell coordinates change**, not on every position delta.
+A unit's current cell is:
+
+```
+cellX = floor(position.X / (world.tileSize * CellTilesWide))
+cellY = floor(position.Y / (world.tileSize * CellTilesHigh))
+```
+
+When these change from one tick to the next, the unit is removed from the old cell and
+inserted into the new cell. Units that stay within the same cell incur zero grid maintenance
+cost that tick. On `on_unit_death`, the unit is removed from its cell immediately before
+being removed from `World.unitActors`.
+
+### 19.3 Proximity Query
+
+```
+FSpatialQueryFilter {
+  RequesterId:    FName
+  FactionStance:  "enemy" | "friendly" | "neutral" | "any"    // relative to RequesterId
+  RequiredTags:   TArray<FName>    // result units must have ALL these tags
+  ExcludedTags:   TArray<FName>    // result units must have NONE of these tags
+}
+
+// Returns unit IDs within tileRadius tiles of centerTile matching filter
+TArray<FName> getUnitsInRadius(centerTile: FIntPoint, tileRadius: int32,
+                                filter: FSpatialQueryFilter)
+```
+
+**Algorithm:**
+
+1. Compute cell range: `[cx ± ceil(tileRadius / CellTilesWide)] × [cy ± ceil(tileRadius / CellTilesHigh)]`
+2. Collect all unit IDs from cells in range (the square envelope).
+3. Discard units whose actual Chebyshev tile distance from `centerTile` exceeds `tileRadius`
+   (square-to-circle cull).
+4. Apply `filter` (faction stance via `ownerId → factionId → relationship`;
+   tags via `hasEntityTag`).
+
+For typical combat ranges (1–4 tiles), step 1 touches at most 81 cells each holding O(1–5)
+units — far cheaper than O(n) over 1000+ unit actors.
+
+### 19.4 Building Proximity
+
+Buildings do not move. Their proximity is resolved directly from tile data: iterate tiles
+in a bounding square around the query origin and check `TileInstance.occupantId`. This is
+O(r²) tile reads, which is acceptable because building queries are infrequent (placement,
+demolition, adjacency evaluation) and tiles are small, cache-friendly structs.
+
+---
+
+## 22. Network & Multiplayer Model
+
+Bastion uses a **server-authoritative** model. The full simulation runs on the server
+(listen or dedicated). Clients are display and input nodes — they do not simulate the
+economy or pathfinding and cannot write authoritative world state.
+
+### 22.1 Authority Model
+
+| System | Authority | Client receives |
+|---|---|---|
+| Economy (tasks, resources, inventory) | Server only | Summary quantities at reduced rate |
+| Unit positions & state | Server; replicated | Positions within relevance range |
+| Combat (damage, health) | Server only | Health values after resolution |
+| Pathfinding | Server only | Not replicated; clients interpolate received positions |
+| Zone ownership | Server | Replicated to all clients |
+| Adjacency & modifier stacks | Server only | Net attribute values where needed for UI |
+| Player commands | Client → Server | Applied by server; no client-side prediction |
+
+### 22.2 Player Commands
+
+Client input is transmitted as lightweight command structs. The server applies commands on
+the next available simulation tick.
+
+```
+FPlayerCommand {
+  Type:          EPlayerCommandType
+  IssuerId:      FName
+  UnitIds:       TArray<FName>           // units involved
+  TargetId:      TOptional<FName>        // target entity (attack, assign)
+  TargetTile:    TOptional<FIntPoint>    // target position (move, build)
+  AbilityDefId:  TOptional<FName>
+  BuildingDefId: TOptional<FName>
+  Rotation:      TOptional<int32>        // for build commands
+  ClientTime:    float                   // diagnostic only; server does not use for simulation
+}
+
+EPlayerCommandType:
+  Move | AttackTarget | AttackMove | Assign | Unassign |
+  Build | Demolish | UseAbility | PickupWorldObject    // UENUM
+```
+
+Commands are queued per-player on the server and processed at the start of each simulation
+tick. Invalid commands (targeting an unowned unit, building in an unowned zone) are silently
+discarded.
+
+### 22.3 Bandwidth Reduction
+
+**Relevance culling:** Unit position updates are sent to a client only when the unit is
+within a configurable radius of that player's camera focus or lord actor. Units outside
+the relevance region are not replicated that tick; clients hold the last received position.
+
+**Variable replication rate:** Units close to a player replicate every tick (full rate).
+Units near the outer relevance boundary replicate every Nth tick. Rate tiers are
+configurable via `World.replicationRateTiers`.
+
+**Economy replication is coarse:** Building task states and resource quantities replicate
+to the owning player only at a coarse interval (default 2–5 seconds). Full per-tick
+replication of every building's inventory is unnecessary — players observe the economy
+through UI summaries. Abstract resources (player- and zone-scoped) replicate on the same
+coarse schedule.
+
+**`FFastArraySerializer`** on `AUnitManagerActor.unitActors` handles delta-serialization
+of the unit state array, sending only changed entries each replication frame.
+
+### 22.4 Simulation Determinism
+
+The simulation is **not required to be deterministic** across clients. Clients do not run
+the simulation, so identical floating-point results across machines are unnecessary. The
+server's output (positions, health, resource counts) is authoritative; clients interpolate
+received values visually.
+
+The `lateralBias` hash (§12.7) is deterministic by design for **server-side** replay
+reproducibility and bug reproduction. It has no multiplayer correctness requirement.
+
+### 22.5 Session Configuration
+
+```
+FNetworkSessionConfig {
+  Mode:              "listen" | "dedicated"    // UENUM
+  MaxPlayers:        int32
+  TickRate:          int32     // Hz; recommended 20–30
+  RelevanceRadius:   float     // tiles; default 80
+  EconomyReplicRate: float     // seconds per economy push; default 3.0
+}
+```
+
+No peer-to-peer model is supported. Listen server mode co-locates one player with the
+server process; dedicated server mode runs headlessly. Both use identical simulation code.
+
+---
+
 ## Key Constraints (Tile/World Domain)
 
 - **Tiles are the world primitive; clusters are the pathfinding primitive.** Cluster edge
@@ -625,3 +793,11 @@ is not required for this use case.
   is not used for unit pathing. Tile elevation data is the authoritative source for all
   movement calculations. Footprint flattening on building placement is a visual operation
   only — tile elevation data is not modified.
+- **The spatial unit grid is derived, not authoritative.** `FSpatialUnitGrid` is maintained
+  by `AUnitManagerActor` as an acceleration structure. It is not part of `World` state,
+  not replicated, and not persisted. It is rebuilt or updated incrementally from unit
+  positions. Proximity queries go through it, never through O(n) unit actor scans.
+- **Clients do not simulate.** All economy, combat, pathfinding, and skill resolution runs
+  server-side. Clients receive replicated state within their relevance radius and interpolate
+  positions visually. Player input is transmitted as `FPlayerCommand` structs and applied
+  by the server.
