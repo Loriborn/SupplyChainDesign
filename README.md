@@ -10,9 +10,8 @@ technologies, and events.
 
 Bastion is implemented in **C++ and Blueprints for Unreal Engine 5.5** (primary target), with
 UE 5.7 as a forward-compatibility target depending on stability. All data structures and
-runtime logic are expressed exclusively in UE-native terms. There is no engine-agnostic
-abstraction layer and no Python or external demo — implementation is entirely in-engine in
-C++ and Blueprints.
+runtime logic are expressed exclusively in UE-native terms. Implementation is entirely
+in-engine in C++ and Blueprints.
 
 > **Critical UE constraints:** Units do **not** use `APawn`, `ACharacter`, or the built-in
 > `UNavigationSystem` / NavMesh. All movement and pathfinding is custom HPA\* (§12). Units
@@ -31,10 +30,10 @@ The full data model is split across four domain documents:
 
 | Domain | File | Contents |
 |---|---|---|
-| **Tile / World** | [TILE_WORLD.md](TILE_WORLD.md) | Tile definitions, zones, world map parameters, player state, pathfinding & movement (§1, §2, §7, §12) |
-| **Entities / Workers** | [ENTITIES_WORKERS.md](ENTITIES_WORKERS.md) | Entity interfaces, unit type definitions, unit actors, attributes & modifiers (§0, §6, §9, §13) |
+| **Tile / World** | [TILE_WORLD.md](TILE_WORLD.md) | Tile definitions, zones, world map parameters, player state, pathfinding & movement, elevated navigation, terrain rendering, spatial unit index, network model (§1, §2, §7, §12, §17, §19, §22) |
+| **Entities / Workers** | [ENTITIES_WORKERS.md](ENTITIES_WORKERS.md) | Entity interfaces, unit type definitions, unit actors, attributes & modifiers, abilities, combat & damage types, skill system / veterancy (§0, §6, §9, §13, §18, §20, §21) |
 | **Resources** | [RESOURCES.md](RESOURCES.md) | Resource definitions, equipment, world objects (§3, §14, §16) |
-| **Buildings / Jobs** | [BUILDINGS_JOBS.md](BUILDINGS_JOBS.md) | Building definitions, work tasks & steps, building actors, game events, connections, technologies (§4, §5, §8, §10, §11, §15) |
+| **Buildings / Jobs** | [BUILDINGS_JOBS.md](BUILDINGS_JOBS.md) | Building definitions, work tasks & steps, building actors, game events, connections, technologies, adjacency bonuses (§4, §5, §8, §10, §11, §15, §23) |
 
 ---
 
@@ -61,12 +60,12 @@ Each entity type implements only the interfaces relevant to its role. See §0 fo
 full interface definitions and implementation summary.
 
 **Unit implementation:** All units use a **Manager Actor + `FFastArraySerializer`** pattern
-(`AUnitManagerActor` owning a replicated `TArray<FUnitState>`). Individual `AActor` per unit
-was rejected because RTS zoom-out capability eliminates distance-based relevancy, collapsing
-worst-case channel count to ~10,400 (2,600 units × 4 clients) and making replication manager
-CPU cost the binding constraint. `FFastArraySerializer` collapses this to 4 channels.
-Rendering uses **AnimToTexture + HISMCs**. Position is full `float` X/Y. Units may overlap;
-path wobble via deterministic lateral bias (seeded from unit ID) provides visual variation.
+(`AUnitManagerActor` owning a replicated `TArray<FUnitState>`). RTS zoom-out capability
+eliminates distance-based relevancy, collapsing worst-case channel count to ~10,400
+(2,600 units × 4 clients) and making replication manager CPU cost the binding constraint.
+`FFastArraySerializer` collapses this to 4 channels. Rendering uses **AnimToTexture + HISMCs**.
+Position is full `float` X/Y. Units may overlap; path wobble via deterministic lateral bias
+(seeded from unit ID) provides visual variation.
 
 **Units do not use APawn, ACharacter, or UNavigationSystem.** Units are entries in
 `AUnitManagerActor`'s replicated state array. The built-in UE character movement component
@@ -100,6 +99,57 @@ readability. In C++ they are `UENUM(BlueprintType)` with `uint8` underlying type
 
 **Structs** are `USTRUCT(BlueprintType)`. **Interfaces** are pure virtual `UInterface`
 types. **Definitions** inherit from `UPrimaryDataAsset`.
+
+---
+
+## C++ and Blueprint Architecture
+
+Bastion draws a hard line between what lives in C++ and what lives in Blueprint. The
+guiding rule: **C++ owns structure and performance; Blueprint owns logic and authoring.**
+
+### C++ layer
+- All core simulation structs (`FUnitState`, `FTileInstance`, `FModifier`, etc.)
+- All `UPrimaryDataAsset` definition base classes with their field declarations
+- All `UInterface` capability contracts (`IDamageable`, `IModifiable`, etc.)
+- `AUnitManagerActor`, `ABuildingActor`, `AWorldObjectActor`, `ARealtimeMeshActor`
+- The simulation tick, HPA* pathfinding, spatial grid, modifier stack evaluation
+- `FFastArraySerializer` replication logic
+- All `UENUM(BlueprintType)` values
+- `UBlueprintFunctionLibrary` subclasses exposing simulation queries to Blueprint
+  (e.g. `UBastionQueryLibrary::GetEffectiveAttribute`, `GetUnitsInRadius`)
+
+### Blueprint layer
+All **designer-authored logic** is Blueprint. Where the documentation says "scripted
+logic", this always means a **Blueprint subclass of a C++ base class** with a
+`BlueprintNativeEvent` override. There is no embedded scripting language, no Lua,
+and no string-eval expressions. Specific patterns:
+
+| Logic type | C++ base | Blueprint role |
+|---|---|---|
+| Building placement validation | `UPlacementRule` | Override `EvaluateTile` |
+| Task concurrency compatibility | `UTaskCompatibilityRule` | Override `CanCoexist` |
+| Ability autocast condition | `UAbilityAutocastCondition` | Override `ShouldAutocast` |
+| World object timer behaviour | `UWorldObjectTimerScript` | Override `OnFire` |
+| Damage formula override | `UDamageCalculation` | Override `Calculate` |
+
+Each of these base classes is `UCLASS(Abstract, Blueprintable)`. Designers create
+Blueprint subclasses in the Content Browser and reference them by class reference
+(`TSubclassOf<T>`) on the relevant `UPrimaryDataAsset` Definition.
+
+### Data assets vs DataTables
+**`UPrimaryDataAsset` subclasses** (via Blueprint instances in the Content Browser)
+are the primary authoring format for all Definitions. They support asset references
+(skeletal meshes, textures, sounds, class references) that CSV/JSON cannot express.
+
+**`UDataTable`** (importable from CSV or JSON) is an option for pure-numeric tabular
+data where external spreadsheet editing is valuable — for example, a stat-tuning pass
+on unit base attributes or resource quantity thresholds. DataTable rows must map to a
+`USTRUCT` with no asset references. They supplement DataAssets; they do not replace
+them. Any definition field that references a Blueprint class, a skeletal mesh, or an
+animation asset must remain in a DataAsset, not a DataTable.
+
+There is no runtime JSON loader for game definitions. JSON import is a content-pipeline
+tool only (DataTable import in the editor).
 
 ---
 

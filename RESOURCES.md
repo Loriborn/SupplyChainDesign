@@ -205,58 +205,50 @@ Real-elapsed-time based, not tick-counted (consistent with UE timer semantics).
 
 ```
 FWorldObjectTimer {
-  Rate:       float      // seconds between firings; must be > 0
-  MaxFirings: int32      // 0 = fire indefinitely; 1 = fire once then stop; N = fire N times
-  OnFire:     TOptional<FWorldObjectScript>
+  Rate:            float                               // seconds between firings; must be > 0
+  MaxFirings:      int32                              // 0 = fire indefinitely; N = fire N times then stop
+  TimerScriptClass: TSubclassOf<UWorldObjectTimerScript>  // Blueprint behaviour; null = no behaviour
 }
 ```
 
-**Examples:**
+### 16.2 World Object Timer Script
+
+Timer behaviour is implemented as a **Blueprint subclass of `UWorldObjectTimerScript`**,
+not as an inline expression. Create a Blueprint subclass in the Content Browser and assign
+the class to `FWorldObjectTimer.TimerScriptClass`.
 
 ```
-// Meat that rots after 120 seconds (fires once, then world object transforms)
-timer: { rate: 120.0, maxFirings: 1, onFire: transform("rotten_meat", self.quantity) }
-
-// A relic that never expires (no timer)
-timer: null
-
-// A torch that flickers every 5 seconds indefinitely (visual/event effect only)
-timer: { rate: 5.0, maxFirings: null, onFire: fireEvent("torch_flicker") }
-
-// A poison cloud that damages nearby units every 2 seconds, 10 times, then dissipates
-timer: { rate: 2.0, maxFirings: 10, onFire: <damage script>; on final firing: consume() }
+// UCLASS(Abstract, Blueprintable) — UObject subclass.
+//
+// UFUNCTION(BlueprintNativeEvent)
+// void OnFire(AWorldObjectActor* Owner, int32 FiringIndex, int32 MaxFirings);
+//
+// FiringIndex is 1-based; equals MaxFirings on the final firing.
+// Use the Blueprint-callable helper functions below (declared on this base class)
+// to interact with the world. Do not mutate world state directly.
 ```
 
-The `on_world_object_expired` event hook fires on the **final** timer firing (when
-`maxFirings` is reached). For `maxFirings: null` (indefinite) timers, this hook never
-fires unless the world object is explicitly consumed by its script. The `elapsed` field
-on `WorldObjectActor` tracks total seconds since the object was spawned, independent of
-the timer.
+**Blueprint-callable helpers on `UWorldObjectTimerScript`:**
 
-### 16.2 World Object Script
+| Function | Effect |
+|---|---|
+| `TransformSelf(Owner, NewResourceDefId, Quantity)` | Replaces the world object with a new one of a different resource type |
+| `ConsumeSelf(Owner)` | Removes the world object silently |
+| `FireEvent(Owner, EventDefId)` | Fires a named `EventDefinition` |
+| `SpawnObject(Owner, ResourceDefId, Quantity, Tile)` | Spawns an additional world object at the specified tile |
 
-A Turing-complete scripted expression defined within a `WorldObjectTimer.onFire`. It
-executes each time the timer fires. The script may access world state and issue a limited
-set of actions.
+**Example patterns (as Blueprint subclass descriptions, not inline code):**
 
-```
-WorldObjectScript {
-  script: <expression>
-  // Script context:
-  //   self          — this WorldObjectActor
-  //   world         — read-only world state queries
-  //   firing        — current firing index (1-based); equals maxFirings on final firing
-  // Available actions:
-  //   transform(newResourceDefId, quantity)          — replace self with a new world object
-  //   consume()                                      — remove self from world silently
-  //   fireEvent(eventDefId)                          — fire a named event
-  //   spawnObject(resourceDefId, quantity, position) — create additional world objects
-}
-```
+- **Rotting meat** — `MaxFirings: 1`. Override `OnFire`: call `TransformSelf` with
+  `"rotten_meat"` and `Owner.Contents[0].Quantity` on the first (and only) firing.
+- **Torch flicker** — `MaxFirings: 0` (indefinite). Override `OnFire`: call `FireEvent`
+  with `"torch_flicker"` every firing. No termination.
+- **Poison cloud** — `MaxFirings: 10`. Override `OnFire`: deal damage via `GRANT_SKILL_XP`
+  or a custom helper each firing; call `ConsumeSelf` when `FiringIndex == MaxFirings`.
 
-Scripts may branch on `firing` to produce different behavior on the final execution. For
-example, a poison cloud may apply damage on each firing and call `consume()` only when
-`firing == maxFirings`.
+The `on_world_object_expired` event hook fires when the **final** firing completes (when
+`MaxFirings` is reached and `OnFire` returns). For `MaxFirings: 0` (indefinite) timers,
+this hook never fires unless `ConsumeSelf` is called explicitly.
 
 ### 16.3 World Object Actor (Runtime)
 
