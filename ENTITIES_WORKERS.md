@@ -573,14 +573,25 @@ separate task-management path at the equipment layer.
 
 ## 18. Abilities
 
-Abilities are player-invoked or auto-triggered active actions that units and buildings can
-perform. They are the mechanism for all direct combat interactions, targeted support actions,
-and any player-facing micro-management. Abilities are distinct from work tasks — they are
-not part of the macro economy system and do not interact with inventory steps.
+Abilities are player-invoked, auto-triggered, or always-on effects that units and buildings
+can have. They are the mechanism for all direct combat interactions, targeted support actions,
+player-facing micro-management, and passive always-on effects. Abilities are distinct from
+work tasks — they are not part of the macro economy system and do not interact with inventory
+steps.
 
 **Reference model:** BFME (Battle for Middle Earth) abilities — player selects a unit or
 building, clicks an ability button, selects a target (unit, building, tile, or area), and
-the effect fires. Abilities range from direct damage to buffs to AoE effects.
+the effect fires. Abilities range from direct damage to buffs to AoE effects. Passive
+abilities (auras, always-on self-buffs) extend this model.
+
+**Attribute referencing:** Abilities do not require unit attributes. Effect fields like
+`damageScalesWith` and `healScalesWith` are optional — an ability may use a flat value, scale
+from an attribute, or combine both. When an attribute is referenced, the ability reads
+`getEffectiveAttribute(casterId, attributeId)` at the moment of firing. This means modifier
+stack changes (from equipment, techs, or events) automatically affect the ability's power
+without any additional wiring. An ability that has no attribute dependencies is equally valid
+— it simply uses its declared flat values. This is analogous to UE GAS attribute accessors:
+the system provides the lookup; nothing forces abilities to use it.
 
 ### 18.1 AbilityDefinition
 
@@ -590,6 +601,13 @@ FAbilityDefinition {
   Name:              FString
   Icon:              TSoftObjectPtr<UTexture2D>
   Description:       FString
+
+  activationType:    "active" | "passive"
+  // "active"  — player-triggered or autocast; uses targetType, cooldown, effects below
+  // "passive" — always-on; activates when granted, deactivates when revoked;
+  //             uses passiveEffect below; targetType, cooldown, autocast are ignored
+
+  // ── Active ability fields (used when activationType = "active") ────────────
 
   // Targeting
   TargetType:        EAbilityTargetType    // UENUM; see below
@@ -764,7 +782,103 @@ The unit's full ability set is `UnitTypeDefinition.abilities ∪ grantedAbilitie
 Buildings may also declare abilities in their `BuildingDefinition`. Building abilities
 follow the same `AbilityDefinition` structure. A tower that fires a special player-triggered
 shot, or a shrine that casts a zone-wide buff, are both building abilities. Building abilities
-are activated by player command (or autocast if configured).
+are activated by player command (or autocast if configured). Buildings may also have passive
+abilities (e.g. an aura building that continuously buffs nearby allies).
+
+### 17.5 Passive Abilities
+
+A passive ability has `activationType: "passive"`. It activates automatically when granted
+to a unit or building (either at spawn via the unit type definition, or at runtime via
+equipment/tech/event grant) and deactivates when revoked. It has no cooldown, no player
+targeting, and no cost — it is always on for as long as it is held.
+
+`PassiveEffect` defines what the passive does:
+
+```
+PassiveEffect =
+    { type: "self_modifier"
+      modifierTemplate: ModifierTemplate
+      // Instantiates modifierTemplate on the bearer when the passive activates.
+      // The modifier's duration is overridden to "indefinite" — the ability lifecycle
+      // controls the modifier lifetime, not the timer. When the passive is revoked
+      // (ability removed), the modifier is immediately removed from the stack.
+      // Use this for always-on self-buffs: a knight ability that permanently adds
+      // +10 armour while held, removed if the ability is revoked by an event.
+    }
+
+  | { type: "aura"
+      radius:           float                   // tile radius around the bearer
+      constraints:      AbilityTargetConstraint // which entities the aura affects
+      modifierTemplate: ModifierTemplate
+      updateInterval:   float                   // seconds between aura re-evaluations
+                                                // (0.5 is a typical default; 0 = every tick)
+      // On each update:
+      //   1. Find all entities within radius satisfying constraints.
+      //   2. Apply modifierTemplate (sourceId = this ability's id) to newly in-range entities.
+      //   3. Remove the modifier (by sourceId) from newly out-of-range entities.
+      // The modifier duration on the template is ignored — the aura manages lifetime directly.
+      // Use this for proximity buffs/debuffs: a banner unit that grants +15% attackDamage
+      // to all friendly units within 5 tiles.
+    }
+
+  | { type: "script"
+      script:           PassiveScript
+      updateInterval:   float    // seconds between evaluations; 0 = every tick
+      // Executes script on each interval. The script has access to:
+      //   self  — the bearer unit or building actor
+      //   world — read-only world state queries (same query set as other scripted contexts)
+      // Available actions within the script:
+      //   applyModifier(entityId, modifierTemplate)
+      //   removeModifier(entityId, sourceId)
+      //   fireEvent(eventDefId)
+      //   spawnObject(resourceDefId, quantity, position)
+      // Use this for passives with conditional or stateful logic that cannot be expressed
+      // as a flat aura: a passive that applies a different modifier depending on the
+      // bearer's current health percentage, or one that only auras allies that have a
+      // specific tag.
+    }
+```
+
+**Passive ability lifecycle:**
+
+| Event | What happens |
+|---|---|
+| Passive granted (spawn / equipment / tech / `GRANT_ABILITY`) | `PassiveEffect` activates immediately |
+| Bearer moves (aura) | Aura re-evaluated on next `updateInterval` tick |
+| Passive revoked (`REVOKE_ABILITY` / equipment unequipped / modifier expired) | All effects applied by this passive are immediately removed (modifiers removed by sourceId = ability id) |
+| Bearer dies | All passive effects deactivate with the unit; no cleanup needed |
+
+**`REVOKE_ABILITY` event action:** Removes a granted ability from a specific entity, triggering
+passive deactivation. Added to the event action table alongside `GRANT_ABILITY`.
+
+**Example — Banner Carrier aura:**
+```
+AbilityDefinition {
+  id:             "banner_carrier_aura"
+  activationType: "passive"
+  passiveEffect: {
+    type:             "aura"
+    radius:           5.0
+    constraints:      { factionStance: "friendly", entityTypes: ["unit"], requiredTags: [] }
+    modifierTemplate: { attributeTarget: "attackDamage", operation: "multiplicative",
+                        value: 0.15, duration: "indefinite", tags: ["banner_aura"] }
+    updateInterval:   0.5
+  }
+}
+```
+
+**Example — Veteran passive (self-modifier):**
+```
+AbilityDefinition {
+  id:             "veteran_toughness"
+  activationType: "passive"
+  passiveEffect: {
+    type:             "self_modifier"
+    modifierTemplate: { attributeTarget: "armour", operation: "additive",
+                        value: 5.0, duration: "indefinite", tags: ["veteran"] }
+  }
+}
+```
 
 ---
 
@@ -1013,6 +1127,12 @@ FWorkStepDefinition {
   cancels the step with no resource refund. Carried resources remain on the unit.
 - **All attacks are abilities.** There is no separate generic attack path. Auto-attack,
   retaliation, and special abilities all flow through the `AbilityDefinition` system.
+- **Abilities do not require attributes.** Attribute references in effects are optional.
+  When present, they read `getEffectiveAttribute` at fire time — modifier stack changes
+  automatically propagate. Flat-value-only abilities are equally valid.
+- **Passive abilities are always-on and lifecycle-managed.** They activate on grant and
+  deactivate on revoke. Self-modifier, aura, and script variants are provided. The passive
+  manages modifier lifetimes directly — no duration timer is needed.
 - **Enemy determination is faction-based.** `ownerId` → `factionId` → `FactionRelationship.stance`.
   "Enemy" means `stance: "hostile"`. All relationship configuration is in `FactionDefinition`.
 - **Core attribute floors are hardcoded.** `maxHealth ≥ 1`, `armour ≥ 0`,
