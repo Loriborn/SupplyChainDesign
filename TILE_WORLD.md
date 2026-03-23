@@ -479,7 +479,6 @@ actor. The visible terrain surface is a procedural mesh managed by the
 ### 17.1 Chunking
 
 The terrain mesh is divided into chunks — one per zone or one per fixed NxN tile region.
-The terrain mesh is divided into chunks — one per zone or one per fixed NxN tile region.
 Each chunk is an independent `ARealtimeMeshActor`. Only the chunk(s) covering changed tiles
 are regenerated; all other chunks are untouched.
 
@@ -707,9 +706,9 @@ server process; dedicated server mode runs headlessly. Both use identical simula
 - **Path requests are queued and prioritized.** Priority is caller-set; the recommended
   convention is player_command=100, task=50, background=10. `requestedAt` breaks ties.
 - **World objects do not block pathfinding.** Units overlap them freely.
-- **Building destruction clears tile occupancy and updates the coarse grid.** A destroyed
-  building's footprint tiles are immediately freed; affected coarse tiles are recomputed
-  and units with stale paths through those tiles replan.
+- **Building destruction clears tile occupancy and invalidates paths.** A destroyed
+  building's footprint tiles are immediately freed; units with paths through those tiles
+  are re-queued for replanning.
 - **The World is the single source of truth.** Nothing is cached outside World state
   during a live simulation session.
 - **Zone tile assignment is fixed at map load.** Zone boundaries come from a designer-
