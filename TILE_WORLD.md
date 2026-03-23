@@ -80,7 +80,9 @@ Elevation also contributes an additive cost to passable edges, scaled by
 | `mapWidth` | `int32` | Map width in tiles |
 | `mapHeight` | `int32` | Map height in tiles |
 | `tileSize` | `float` | Physical size of one tile in world units (cm) |
-| `clusterSize` | `int32` | Tiles per cluster edge for hierarchical pathfinding |
+| `coarseFactor` | `int32` | Fine tiles per coarse grid tile edge (default: `16`). Determines coarse grid resolution; see §12.2 |
+| `localPathRadius` | `int32` | Fine-tile window radius for local A\* (default: `24`). Larger values handle bigger obstacles but cost more per search |
+| `stuckTickThreshold` | `int32` | Ticks without position advance before fallback full A\* is triggered (default: `60`) |
 | `heightScalar` | `float` | World-unit height per elevation integer unit. Multiply `TileInstance.elevation` by this to get world-unit height (cm). Default: `100.0`. |
 | `elevationCostFactor` | `float` | Scalar applied to elevation delta in edge cost formula. `0.0` = elevation costless but still blocks. `1.0` = 1 elevation unit = 1.0 added to edge cost. Default: `1.0` |
 | `pathBudgetPerTick` | `int32` | Maximum path requests processed per simulation tick. Recommended range: 50–200 depending on map size and expected unit density. Prevents burst spikes on group move orders. |
@@ -196,12 +198,14 @@ Nothing is cached outside of World state.
 | `mapWidth` | `int32` | Map width in tiles |
 | `mapHeight` | `int32` | Map height in tiles |
 | `tileSize` | `float` | World-unit size of one tile (cm) |
-| `clusterSize` | `int32` | Tiles per cluster edge |
+| `coarseFactor` | `int32` | See §1.4 |
+| `localPathRadius` | `int32` | See §1.4 |
+| `stuckTickThreshold` | `int32` | See §1.4 |
 | `heightScalar` | `float` | See §1.4 |
 | `elevationCostFactor` | `float` | See §1.4 |
 | `pathBudgetPerTick` | `int32` | See §1.4 |
 | `tiles` | `TArray<FTileInstance>` | Flat array; index = `Y * MapWidth + X` |
-| `clusterGraph` | `FClusterGraph` | Ground-level hierarchical pathfinding graph; see §12 |
+| `coarseGrid` | `FCoarseGrid` | Ground-level coarse passability grid; see §12.2 |
 | `elevatedGraph` | `FElevatedNavGraph` | Sparse elevated navigation graph; see §12.9 |
 | `pathRequestQueue` | `TArray<FPathRequest>` | Pending pathfinding requests |
 | `zones` | `TArray<FZoneInstance>` | All zone instances |
@@ -260,111 +264,109 @@ that belong to the player rather than any specific zone or building.
 
 ## 12. Pathfinding & Movement
 
-### 12.1 Why Tiles Are Not Pathfinding Nodes
+### 12.1 Overview
 
-Tile-as-node A* does not scale. A 480×480 map contains 230,400 nodes; NavMesh was considered
-and rejected because per-tile movement costs (grass vs stone per unit type) break polygon
-simplification assumptions. **HPA\*** operates on a coarser cluster graph; local A* within
-each cluster uses full tile cost data.
-
-### 12.2 ClusterCoord
-
-Cluster coordinates use `FIntPoint` (`X`, `Y`).
-
-### 12.3 Cluster Graph
+Pathfinding uses two A\* passes: a **coarse grid** search for macro routing and a **local
+A\*** search for fine-tile execution. Units never set `occupantId` and never block tiles, so
+inter-unit avoidance is not a pathfinding concern. There is no precomputed cluster graph and
+no per-unit-type edge cost table.
 
 ```
-FClusterGraph {
-  Clusters:  TArray<TArray<FCluster>>    // [ClusterY][ClusterX]
-}
+Three execution tiers per unit each tick:
 
-FCluster {
-  Coord:      FIntPoint
-  bDirty:     bool                         // triggers edge recomputation next tick
-  Edges:      TArray<FClusterEdge>
-  Boundaries: TArray<FClusterBoundary>     // one per adjacent cluster
-}
+  Tier 1 — Coarse path   Computed once on move command or when invalidated.
+                         A* on a 32×32 coarse grid. Shared across all units in a
+                         group move order — one search for the whole selection.
 
-FClusterEdge {
-  TargetCluster:  FIntPoint
-  Costs:          TArray<FClusterEdgeCost>    // pre-computed per unit type
-  ImpassableFor:  TArray<FName>               // unitTypeIds that cannot cross this boundary
-}
+  Tier 2 — Local path    Computed when the unit needs its next fine-tile segment.
+                         A* on a small fine-tile window around the unit toward
+                         the next coarse waypoint (or final destination).
 
-FClusterEdgeCost {
-  UnitTypeId:  FName
-  Cost:        float    // pre-computed traversal cost (tile movement costs + elevation)
+  Tier 3 — Steering      Every tick. Unit advances along its local path tile by tile.
+```
+
+### 12.2 Coarse Grid
+
+The coarse grid is a downsampled passability map. Each coarse tile represents a
+`world.coarseFactor × world.coarseFactor` block of fine tiles (default: `16`, yielding a
+32×32 coarse grid on a 512×512 map).
+
+```
+FCoarseGrid {
+  Width:   int32            // mapWidth  / world.coarseFactor
+  Height:  int32            // mapHeight / world.coarseFactor
+  Tiles:   TArray<bool>     // [Y * Width + X]; true = passable
 }
 ```
 
-**Scale example (480×480, clusterSize=16):**
-```
-Cluster grid:        30×30 = 900 nodes for high-level search
-Local A* per cluster: 256 nodes maximum
-Flat tile A*:         230,400 nodes — ~40× more expensive
-```
+**Passability rule:** coarse tile `(cx, cy)` is passable if the center fine tile at
+`(cx * coarseFactor + coarseFactor/2, cy * coarseFactor + coarseFactor/2)` is passable.
+Local A* handles fine-grained navigation within and between coarse tiles, so this
+approximation is sufficient.
 
-### 12.3.1 Cluster Boundaries and Entry Points
+The coarse grid is rebuilt for affected tiles immediately when a building is placed or removed
+(see §12.5). Rebuild cost is O(footprint tiles / coarseFactor²) — negligible.
 
-A **cluster boundary** is the shared tile edge between two horizontally or vertically adjacent
-clusters. For a `clusterSize`-wide cluster grid, a horizontal boundary is the column of tiles
-at `x = (clusterX + 1) * clusterSize` (the rightmost column of the left cluster / leftmost
-column of the right cluster). Diagonal cluster adjacency is not used — boundaries are
-axis-aligned only.
+### 12.3 Data Structures
 
 ```
-FClusterBoundary {
-  NeighborCluster:  FIntPoint                     // cluster on the other side of this boundary
-  Direction:        "north" | "south" | "east" | "west"    // UENUM
-  EntryPoints:      TArray<FEntryPoint>
+// Per unit currently moving
+FUnitPath {
+  Destination:      FIntPoint           // final fine-tile destination
+  CoarseWaypoints:  TArray<FIntPoint>   // remaining coarse-grid waypoints; front = next target
+  LocalPath:        TArray<FIntPoint>   // fine-tile path toward current coarse waypoint
+  StuckTicks:       int32               // ticks without position advance; reset on any progress
 }
 
-FEntryPoint {
-  TileA:               FIntPoint                  // tile on this cluster's side of the boundary
-  TileB:               FIntPoint                  // tile on the neighbor cluster's side
-  IntraClusterCosts:   TArray<FIntraClusterCost>  // cost from this entry point to every other
-}
-
-FIntraClusterCost {
-  ToEntryPointIndex:  int32     // index into same FClusterBoundary's EntryPoints array
-  UnitTypeId:         FName
-  Cost:               float     // local A* cost within the cluster between the two points
+// Shared by all units issued a group move order
+FGroupPath {
+  GroupId:          FName
+  CoarseWaypoints:  TArray<FIntPoint>   // computed once; all group members reference this
+  Destination:      FIntPoint           // shared target tile
 }
 ```
 
-**Entry point selection algorithm:**
+Units in a group move reference their `FGroupPath.CoarseWaypoints` directly rather than
+holding their own coarse path. Group path invalidation triggers one coarse A\* replan that
+all members immediately adopt.
 
-Entry points are computed from the contiguous runs of passable tile pairs along a shared edge.
-A tile pair `(tileA, tileB)` is passable if both tiles have `passable == true`, neither has
-`occupantId != null`, and the elevation delta between them does not exceed any unit type's
-`resolvedHeightDeltaLimit` (pairs are considered per unit type during cost precomputation).
+### 12.4 Path Computation
 
-From each contiguous run of passable tile pairs, **one representative entry point** is selected:
-the pair at the midpoint of the run (rounding down for even-length runs). This keeps the
-abstract graph compact while preserving path coverage. A run of length 1 produces exactly one
-entry point at that single tile pair.
+**Coarse A\*:**
+- Graph: `FCoarseGrid`, 4-connected (axis-aligned only)
+- Heuristic: Manhattan distance in coarse-tile units
+- Output: `TArray<FIntPoint>` written to `FUnitPath.CoarseWaypoints` (or `FGroupPath.CoarseWaypoints`)
+- Worst case: 32×32 = 1,024 nodes; ~5–50 µs per search
 
-> **Why one per run:** Selecting every passable tile as an entry point is maximally accurate
-> but quadratically expensive. One per contiguous run is the standard HPA* approximation —
-> paths may be slightly suboptimal near boundaries but the high-level search remains fast.
-> Implementors may increase density (e.g. one per N tiles of a run) at the cost of a larger
-> abstract graph.
+**Local A\*:**
+- Graph: fine tile grid, clamped to a `world.localPathRadius × world.localPathRadius` window
+  centered on the unit (default: `24`, giving 576 nodes maximum)
+- Heuristic: Manhattan distance in fine-tile units
+- Target: next coarse waypoint tile, or `FUnitPath.Destination` when on the last waypoint
+- Output: `TArray<FIntPoint>` written to `FUnitPath.LocalPath`; typically 10–20 tiles
+- Worst case: ~5–15 µs per search
 
-**Intra-cluster cost precomputation:** For each unit type, local A* is run within the cluster
-between every pair of entry points on its boundaries. The resulting costs populate
-`IntraClusterCost[]`. This is the dominant precomputation cost and is the work triggered by
-`Cluster.dirty == true`.
+Local A\* is recomputed when:
+- The unit consumes the last tile in `LocalPath`
+- A building change makes any tile in `LocalPath` impassable (see §12.5)
 
-### 12.4 Per-Unit-Type Edge Weights
+**Stuck detection and fallback:**
+If `StuckTicks` exceeds `world.stuckTickThreshold` (default: `60`), the unit runs a full
+fine-tile A\* from its current position to `Destination` with no window constraint, replacing
+both `CoarseWaypoints` and `LocalPath`. This handles edge cases where the coarse path leads
+toward a locally unnavigable area (e.g. a narrow gap the coarse grid approximation missed).
+Full fine-tile A\* is expensive but expected to be rare.
 
-Edge weights are **pre-computed per unit type** at world init and after cluster invalidation.
-Memory cost: `unitTypeCount × clusterBoundaryCount` — trivial at tens of unit types.
+### 12.5 Map Change Handling
 
-### 12.5 Cluster Invalidation
+When a building is placed or removed:
 
-Building placed or removed → all overlapping clusters marked `dirty`. Next tick: dirty
-clusters recompute all edge costs and clear flag. Units with `clusterPath` passing through
-dirty clusters are re-queued. Unaffected units keep their paths.
+1. **Coarse grid update:** recompute passability for all coarse tiles whose center falls
+   within the building footprint. Immediate; no deferred dirty flag.
+2. **Coarse path invalidation:** any unit or group whose `CoarseWaypoints` include a now-
+   changed coarse tile replans via one coarse A\* call (one per group; one per ungrouped unit).
+3. **Local path invalidation:** any unit whose `LocalPath` passes through an affected fine
+   tile clears `LocalPath`; it is recomputed on the next tick.
 
 ### 12.6 Path Request Queue
 
@@ -387,8 +389,8 @@ enforces a particular range — the convention above is a recommended starting p
 commanded unit (`controllable: true`) should use a high priority so its path is computed before
 background task units when the budget is constrained.
 
-Group move orders share one high-level cluster path; local paths are computed per-unit on
-demand as each cluster is reached.
+Group move orders share one coarse path (`FGroupPath`); local paths are computed per-unit
+independently as each unit advances.
 
 ### 12.7 Edge Cost Formula
 
@@ -439,27 +441,27 @@ across ticks (important for simulation replay and determinism).
 
 ### 12.8 Movement
 
-Units advance along `localPath` by `effectiveMovementSpeed * deltaTime` per tick.
+Units advance along `FUnitPath.LocalPath` by `effectiveMovementSpeed * deltaTime` per tick.
 `effectiveMovementSpeed = getEffectiveAttribute(unitId, "movementSpeed")`.
-On cluster boundary reached: next cluster's `localPath` computed on demand.
-Units overlap freely; no reservation or avoidance system.
+When `LocalPath` is consumed, local A\* is recomputed toward the next coarse waypoint
+(or destination if none remain). Units overlap freely; no reservation or avoidance system.
 
 ### 12.9 Elevated Navigation (Verticality)
 
-The ground HPA\* graph (§12.3) covers the full tile grid at ground level. When wall
-structures, towers, or gatehouses are placed, a second sparse nav graph — the **elevated
-graph** — is built from those buildings' elevated-surface tiles.
+The ground nav layer covers the full tile grid at ground level. When wall structures, towers,
+or gatehouses are placed, a second sparse nav graph — the **elevated graph** — is built from
+those buildings' elevated-surface tiles.
 
 The two graphs are fully independent. A unit belongs to exactly one at any time,
 tracked by `FUnitState.currentNavLayer` and `FUnitState.currentElevatedComponentId`.
 
 #### Elevated Graph Structure
 
-The elevated graph is **not** a full parallel tile grid. It is a sparse collection of
-connected components — one per disconnected wall chain. A wall chain is any group of
-elevated-surface tiles reachable from one another without descending to ground. Each
-component runs its own HPA\* cluster graph, built identically to §12.3 but scoped to
-that component's tiles only.
+The elevated graph is a sparse collection of connected components — one per disconnected wall
+chain. A wall chain is any group of elevated-surface tiles reachable from one another without
+descending to ground. Wall chains are inherently narrow structures (typically 1–2 tiles wide),
+so elevated navigation uses direct fine-tile A\* within the component's `TileSet` rather than
+a coarse grid; the node counts are small enough that no further abstraction is needed.
 
 ```
 FElevatedNavGraph {
@@ -470,7 +472,6 @@ FElevatedNavGraph {
 FElevatedComponent {
   Id:            FName                        // stable until graph rebuild
   TileSet:       TArray<FIntPoint>            // all tiles belonging to this wall chain
-  ClusterGraph:  FClusterGraph                // HPA* graph scoped to TileSet
 }
 ```
 
@@ -529,7 +530,7 @@ since stairs are the sole source of transition edges. Actual Z height matters fo
 - Attack range and line-of-sight calculations (elevation advantage)
 - Determining which stair types are valid connectors between height levels
 
-The HPA\* graphs require no knowledge of actual Z height — only tile connectivity.
+The nav graphs require no knowledge of actual Z height — only tile connectivity.
 
 ---
 
@@ -542,9 +543,9 @@ actor. The visible terrain surface is a procedural mesh managed by the
 ### 17.1 Chunking
 
 The terrain mesh is divided into chunks — one per zone or one per fixed NxN tile region.
-Matching chunk boundaries to `clusterSize` is recommended so cluster dirty events can
-double as chunk dirty flags. Each chunk is an independent `ARealtimeMeshActor`. Only the
-chunk(s) covering changed tiles are regenerated; all other chunks are untouched.
+Matching chunk boundaries to `world.coarseFactor` is recommended so coarse grid tile
+boundaries align with chunk boundaries. Each chunk is an independent `ARealtimeMeshActor`.
+Only the chunk(s) covering changed tiles are regenerated; all other chunks are untouched.
 
 ### 17.2 Tile Height
 
@@ -767,13 +768,12 @@ server process; dedicated server mode runs headlessly. Both use identical simula
 - **Only buildings block tiles.** `TileInstance.occupantId` is only ever set by a building
   actor. Units never set it and never block pathfinding. A tile with `archPassable: true`
   is ground-passable despite having an occupant (e.g. gatehouse arch tiles).
-- **Cluster boundaries use one entry point per contiguous passable run.** This is the
-  standard HPA* approximation. All inter-cluster pathfinding passes through entry points.
 - **Path requests are queued and prioritized.** Priority is caller-set; the recommended
   convention is player_command=100, task=50, background=10. `requestedAt` breaks ties.
 - **World objects do not block pathfinding.** Units overlap them freely.
-- **Building destruction clears tile occupancy and invalidates clusters.** A destroyed
-  building's footprint tiles are immediately freed and affected clusters marked dirty.
+- **Building destruction clears tile occupancy and updates the coarse grid.** A destroyed
+  building's footprint tiles are immediately freed; affected coarse tiles are recomputed
+  and units with stale paths through those tiles replan.
 - **The World is the single source of truth.** Nothing is cached outside World state
   during a live simulation session.
 - **Zone tile assignment is fixed at map load.** Zone boundaries come from a designer-
