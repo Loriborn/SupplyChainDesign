@@ -80,12 +80,9 @@ Elevation also contributes an additive cost to passable edges, scaled by
 | `mapWidth` | `int32` | Map width in tiles |
 | `mapHeight` | `int32` | Map height in tiles |
 | `tileSize` | `float` | Physical size of one tile in world units (cm) |
-| `coarseFactor` | `int32` | Fine tiles per coarse grid tile edge (default: `16`). Determines coarse grid resolution; see §12.2 |
-| `localPathRadius` | `int32` | Fine-tile window radius for local A\* (default: `24`). Larger values handle bigger obstacles but cost more per search |
-| `stuckTickThreshold` | `int32` | Ticks without position advance before fallback full A\* is triggered (default: `60`) |
 | `heightScalar` | `float` | World-unit height per elevation integer unit. Multiply `TileInstance.elevation` by this to get world-unit height (cm). Default: `100.0`. |
 | `elevationCostFactor` | `float` | Scalar applied to elevation delta in edge cost formula. `0.0` = elevation costless but still blocks. `1.0` = 1 elevation unit = 1.0 added to edge cost. Default: `1.0` |
-| `pathBudgetPerTick` | `int32` | Maximum path requests processed per simulation tick. Recommended range: 50–200 depending on map size and expected unit density. Prevents burst spikes on group move orders. |
+| `pathBudgetPerTick` | `int32` | Maximum path requests processed per simulation tick. Recommended range: 50–200. Prevents burst spikes on group move orders or mass building invalidation. |
 
 ---
 
@@ -198,15 +195,11 @@ Nothing is cached outside of World state.
 | `mapWidth` | `int32` | Map width in tiles |
 | `mapHeight` | `int32` | Map height in tiles |
 | `tileSize` | `float` | World-unit size of one tile (cm) |
-| `coarseFactor` | `int32` | See §1.4 |
-| `localPathRadius` | `int32` | See §1.4 |
-| `stuckTickThreshold` | `int32` | See §1.4 |
 | `heightScalar` | `float` | See §1.4 |
 | `elevationCostFactor` | `float` | See §1.4 |
 | `pathBudgetPerTick` | `int32` | See §1.4 |
 | `tiles` | `TArray<FTileInstance>` | Flat array; index = `Y * MapWidth + X` |
-| `coarseGrid` | `FCoarseGrid` | Ground-level coarse passability grid; see §12.2 |
-| `elevatedGraph` | `FElevatedNavGraph` | Sparse elevated navigation graph; see §12.9 |
+| `elevatedGraph` | `FElevatedNavGraph` | Sparse elevated navigation graph; see §12.8 |
 | `pathRequestQueue` | `TArray<FPathRequest>` | Pending pathfinding requests |
 | `zones` | `TArray<FZoneInstance>` | All zone instances |
 | `buildingActors` | `TArray<ABuildingActor*>` | All placed buildings |
@@ -266,109 +259,61 @@ that belong to the player rather than any specific zone or building.
 
 ### 12.1 Overview
 
-Pathfinding uses two A\* passes: a **coarse grid** search for macro routing and a **local
-A\*** search for fine-tile execution. Units never set `occupantId` and never block tiles, so
-inter-unit avoidance is not a pathfinding concern. There is no precomputed cluster graph and
-no per-unit-type edge cost table.
+Pathfinding uses A\* on the full tile grid. Units never set `occupantId` and never block
+tiles, so inter-unit avoidance is not a pathfinding concern.
 
-```
-Three execution tiers per unit each tick:
+Group move orders (box-select) share a single A\* result across all selected units. This is
+the primary scalability mechanism — a 200-unit military selection costs one search, not 200.
 
-  Tier 1 — Coarse path   Computed once on move command or when invalidated.
-                         A* on a 32×32 coarse grid. Shared across all units in a
-                         group move order — one search for the whole selection.
+Paths are cached on the unit. Replanning is triggered only when a building change makes a
+unit's stored path impassable. Unaffected units keep their paths indefinitely.
 
-  Tier 2 — Local path    Computed when the unit needs its next fine-tile segment.
-                         A* on a small fine-tile window around the unit toward
-                         the next coarse waypoint (or final destination).
-
-  Tier 3 — Steering      Every tick. Unit advances along its local path tile by tile.
-```
-
-### 12.2 Coarse Grid
-
-The coarse grid is a downsampled passability map. Each coarse tile represents a
-`world.coarseFactor × world.coarseFactor` block of fine tiles (default: `16`, yielding a
-32×32 coarse grid on a 512×512 map).
-
-```
-FCoarseGrid {
-  Width:   int32            // mapWidth  / world.coarseFactor
-  Height:  int32            // mapHeight / world.coarseFactor
-  Tiles:   TArray<bool>     // [Y * Width + X]; true = passable
-}
-```
-
-**Passability rule:** coarse tile `(cx, cy)` is passable if the center fine tile at
-`(cx * coarseFactor + coarseFactor/2, cy * coarseFactor + coarseFactor/2)` is passable.
-Local A* handles fine-grained navigation within and between coarse tiles, so this
-approximation is sufficient.
-
-The coarse grid is rebuilt for affected tiles immediately when a building is placed or removed
-(see §12.5). Rebuild cost is O(footprint tiles / coarseFactor²) — negligible.
-
-### 12.3 Data Structures
+### 12.2 Data Structures
 
 ```
 // Per unit currently moving
 FUnitPath {
-  Destination:      FIntPoint           // final fine-tile destination
-  CoarseWaypoints:  TArray<FIntPoint>   // remaining coarse-grid waypoints; front = next target
-  LocalPath:        TArray<FIntPoint>   // fine-tile path toward current coarse waypoint
-  StuckTicks:       int32               // ticks without position advance; reset on any progress
+  Destination:  FIntPoint           // final tile target
+  Path:         TArray<FIntPoint>   // full tile sequence, source→destination; front = next step
 }
 
-// Shared by all units issued a group move order
+// Shared across all units in a group move order
 FGroupPath {
-  GroupId:          FName
-  CoarseWaypoints:  TArray<FIntPoint>   // computed once; all group members reference this
-  Destination:      FIntPoint           // shared target tile
+  GroupId:      FName
+  Path:         TArray<FIntPoint>   // computed once; all group members reference this directly
+  Destination:  FIntPoint
 }
 ```
 
-Units in a group move reference their `FGroupPath.CoarseWaypoints` directly rather than
-holding their own coarse path. Group path invalidation triggers one coarse A\* replan that
-all members immediately adopt.
+Units in a group move hold a reference to their `FGroupPath` and consume `Path` independently
+(each unit tracks its own index into the shared sequence). Group path invalidation triggers
+one A\* replan; all members adopt the result immediately.
 
-### 12.4 Path Computation
+### 12.3 Path Computation
 
-**Coarse A\*:**
-- Graph: `FCoarseGrid`, 4-connected (axis-aligned only)
-- Heuristic: Manhattan distance in coarse-tile units
-- Output: `TArray<FIntPoint>` written to `FUnitPath.CoarseWaypoints` (or `FGroupPath.CoarseWaypoints`)
-- Worst case: 32×32 = 1,024 nodes; ~5–50 µs per search
+- **Graph:** full tile grid, 4-connected (axis-aligned only)
+- **Heuristic:** Manhattan distance
+- **Open set:** binary heap
+- **Closed set:** flat `bool[mapWidth * mapHeight]` array; allocated once, cleared per search
+- **Output:** tile sequence written to `FUnitPath.Path` or `FGroupPath.Path`
 
-**Local A\*:**
-- Graph: fine tile grid, clamped to a `world.localPathRadius × world.localPathRadius` window
-  centered on the unit (default: `24`, giving 576 nodes maximum)
-- Heuristic: Manhattan distance in fine-tile units
-- Target: next coarse waypoint tile, or `FUnitPath.Destination` when on the last waypoint
-- Output: `TArray<FIntPoint>` written to `FUnitPath.LocalPath`; typically 10–20 tiles
-- Worst case: ~5–15 µs per search
+A path is recomputed when:
+- A move command is issued (unit or group)
+- A building change makes any tile in the unit's current `Path` impassable (see §12.4)
 
-Local A\* is recomputed when:
-- The unit consumes the last tile in `LocalPath`
-- A building change makes any tile in `LocalPath` impassable (see §12.5)
-
-**Stuck detection and fallback:**
-If `StuckTicks` exceeds `world.stuckTickThreshold` (default: `60`), the unit runs a full
-fine-tile A\* from its current position to `Destination` with no window constraint, replacing
-both `CoarseWaypoints` and `LocalPath`. This handles edge cases where the coarse path leads
-toward a locally unnavigable area (e.g. a narrow gap the coarse grid approximation missed).
-Full fine-tile A\* is expensive but expected to be rare.
-
-### 12.5 Map Change Handling
+### 12.4 Map Change Handling
 
 When a building is placed or removed:
 
-1. **Coarse grid update:** recompute passability for all coarse tiles whose center falls
-   within the building footprint. Immediate; no deferred dirty flag.
-2. **Coarse path invalidation:** any unit or group whose `CoarseWaypoints` include a now-
-   changed coarse tile replans via one coarse A\* call (one per group; one per ungrouped unit).
-3. **Local path invalidation:** any unit whose `LocalPath` passes through an affected fine
-   tile clears `LocalPath`; it is recomputed on the next tick.
+1. Collect all fine tiles in the building footprint.
+2. For each unit or group whose `Path` contains any of those tiles: enqueue a replan request.
+3. Unaffected units are untouched.
 
-### 12.6 Path Request Queue
+Replans are processed via the path request queue (§12.5). Units with a stale path continue
+moving along it until their replan is processed; if the next step in their path is now
+impassable, they wait in place.
+
+### 12.5 Path Request Queue
 
 ```
 FPathRequest {
@@ -380,19 +325,15 @@ FPathRequest {
 }
 ```
 
-Requests are sorted descending by `priority`, then ascending by `requestedAt` (earlier
-requests win on ties). Up to `world.pathBudgetPerTick` requests are processed per tick;
-remaining requests stay in queue for the next tick.
+Requests are sorted descending by `priority`, then ascending by `requestedAt`. Up to
+`world.pathBudgetPerTick` requests are processed per tick; remaining requests stay queued.
 
-The priority value is an unconstrained integer set by the caller at request time. No system
-enforces a particular range — the convention above is a recommended starting point. A directly
-commanded unit (`controllable: true`) should use a high priority so its path is computed before
-background task units when the budget is constrained.
+A directly commanded unit (`controllable: true`) should use a high priority so player orders
+resolve before background task replans when the budget is constrained.
 
-Group move orders share one coarse path (`FGroupPath`); local paths are computed per-unit
-independently as each unit advances.
+Group move orders submit one `FPathRequest` for the group, not one per unit.
 
-### 12.7 Edge Cost Formula
+### 12.6 Edge Cost Formula
 
 ```
 edgeCost = resolvedMovementCost(unitTypeId, destTile)
@@ -432,19 +373,14 @@ lateralBias(unitId, tileCoord) =
 //   ++          — concatenation as bytes (e.g. unitId string bytes + int32 x + int32 y)
 ```
 
-The hash is computed once per edge evaluation and requires no persistent state.
-The maximum bias (0.75) is intentionally small relative to normal movement costs (≥ 1.0),
-so routing decisions are influenced but not dominated by the bias term.
+The hash is computed once per edge evaluation and requires no persistent state. The maximum
+bias (0.75) is intentionally small relative to normal movement costs (≥ 1.0).
 
-Implementors must use the same hash algorithm consistently to ensure reproducible paths
-across ticks (important for simulation replay and determinism).
+### 12.7 Movement
 
-### 12.8 Movement
-
-Units advance along `FUnitPath.LocalPath` by `effectiveMovementSpeed * deltaTime` per tick.
+Units advance along `FUnitPath.Path` by `effectiveMovementSpeed * deltaTime` per tick.
 `effectiveMovementSpeed = getEffectiveAttribute(unitId, "movementSpeed")`.
-When `LocalPath` is consumed, local A\* is recomputed toward the next coarse waypoint
-(or destination if none remain). Units overlap freely; no reservation or avoidance system.
+Units overlap freely; no reservation or avoidance system.
 
 ### 12.9 Elevated Navigation (Verticality)
 
@@ -518,7 +454,7 @@ When a wall-type building is demolished:
 4. Units on components that are now entirely disconnected from any transition tile are
    flagged as stranded; the game logic layer is responsible for handling this case
    (e.g. forcing a teleport to ground, triggering an event, or treating the unit as lost).
-5. Ground clusters overlapping the demolished footprint are marked dirty per §12.5.
+5. Ground-layer units with paths through the demolished footprint are re-queued per §12.4.
 
 #### Variable Wall Heights
 
@@ -543,9 +479,9 @@ actor. The visible terrain surface is a procedural mesh managed by the
 ### 17.1 Chunking
 
 The terrain mesh is divided into chunks — one per zone or one per fixed NxN tile region.
-Matching chunk boundaries to `world.coarseFactor` is recommended so coarse grid tile
-boundaries align with chunk boundaries. Each chunk is an independent `ARealtimeMeshActor`.
-Only the chunk(s) covering changed tiles are regenerated; all other chunks are untouched.
+The terrain mesh is divided into chunks — one per zone or one per fixed NxN tile region.
+Each chunk is an independent `ARealtimeMeshActor`. Only the chunk(s) covering changed tiles
+are regenerated; all other chunks are untouched.
 
 ### 17.2 Tile Height
 
