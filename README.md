@@ -30,10 +30,10 @@ The full data model is split across four domain documents:
 
 | Domain | File | Contents |
 |---|---|---|
-| **Tile / World** | [TILE_WORLD.md](TILE_WORLD.md) | Tile definitions, zones, world map parameters, player state, pathfinding & movement (§1, §2, §7, §12) |
-| **Entities / Workers** | [ENTITIES_WORKERS.md](ENTITIES_WORKERS.md) | Entity interfaces, unit type definitions, unit actors, attributes & modifiers (§0, §6, §9, §13) |
+| **Tile / World** | [TILE_WORLD.md](TILE_WORLD.md) | Tile definitions, zones, world map parameters, player state, pathfinding & movement, elevated navigation, terrain rendering, spatial unit index, network model (§1, §2, §7, §12, §17, §19, §22) |
+| **Entities / Workers** | [ENTITIES_WORKERS.md](ENTITIES_WORKERS.md) | Entity interfaces, unit type definitions, unit actors, attributes & modifiers, abilities, combat & damage types, skill system / veterancy (§0, §6, §9, §13, §18, §20, §21) |
 | **Resources** | [RESOURCES.md](RESOURCES.md) | Resource definitions, equipment, world objects (§3, §14, §16) |
-| **Buildings / Jobs** | [BUILDINGS_JOBS.md](BUILDINGS_JOBS.md) | Building definitions, work tasks & steps, building actors, game events, connections, technologies (§4, §5, §8, §10, §11, §15) |
+| **Buildings / Jobs** | [BUILDINGS_JOBS.md](BUILDINGS_JOBS.md) | Building definitions, work tasks & steps, building actors, game events, connections, technologies, adjacency bonuses (§4, §5, §8, §10, §11, §15, §23) |
 
 ---
 
@@ -97,6 +97,57 @@ readability. In C++ they are `UENUM(BlueprintType)` with `uint8` underlying type
 
 **Structs** are `USTRUCT(BlueprintType)`. **Interfaces** are pure virtual `UInterface`
 types. **Definitions** inherit from `UPrimaryDataAsset`.
+
+---
+
+## C++ and Blueprint Architecture
+
+Bastion draws a hard line between what lives in C++ and what lives in Blueprint. The
+guiding rule: **C++ owns structure and performance; Blueprint owns logic and authoring.**
+
+### C++ layer
+- All core simulation structs (`FUnitState`, `FTileInstance`, `FModifier`, etc.)
+- All `UPrimaryDataAsset` definition base classes with their field declarations
+- All `UInterface` capability contracts (`IDamageable`, `IModifiable`, etc.)
+- `AUnitManagerActor`, `ABuildingActor`, `AWorldObjectActor`, `ARealtimeMeshActor`
+- The simulation tick, HPA* pathfinding, spatial grid, modifier stack evaluation
+- `FFastArraySerializer` replication logic
+- All `UENUM(BlueprintType)` values
+- `UBlueprintFunctionLibrary` subclasses exposing simulation queries to Blueprint
+  (e.g. `UBastionQueryLibrary::GetEffectiveAttribute`, `GetUnitsInRadius`)
+
+### Blueprint layer
+All **designer-authored logic** is Blueprint. Where the documentation says "scripted
+logic", this always means a **Blueprint subclass of a C++ base class** with a
+`BlueprintNativeEvent` override. There is no embedded scripting language, no Lua,
+and no string-eval expressions. Specific patterns:
+
+| Logic type | C++ base | Blueprint role |
+|---|---|---|
+| Building placement validation | `UPlacementRule` | Override `EvaluateTile` |
+| Task concurrency compatibility | `UTaskCompatibilityRule` | Override `CanCoexist` |
+| Ability autocast condition | `UAbilityAutocastCondition` | Override `ShouldAutocast` |
+| World object timer behaviour | `UWorldObjectTimerScript` | Override `OnFire` |
+| Damage formula override | `UDamageCalculation` | Override `Calculate` |
+
+Each of these base classes is `UCLASS(Abstract, Blueprintable)`. Designers create
+Blueprint subclasses in the Content Browser and reference them by class reference
+(`TSubclassOf<T>`) on the relevant `UPrimaryDataAsset` Definition.
+
+### Data assets vs DataTables
+**`UPrimaryDataAsset` subclasses** (via Blueprint instances in the Content Browser)
+are the primary authoring format for all Definitions. They support asset references
+(skeletal meshes, textures, sounds, class references) that CSV/JSON cannot express.
+
+**`UDataTable`** (importable from CSV or JSON) is an option for pure-numeric tabular
+data where external spreadsheet editing is valuable — for example, a stat-tuning pass
+on unit base attributes or resource quantity thresholds. DataTable rows must map to a
+`USTRUCT` with no asset references. They supplement DataAssets; they do not replace
+them. Any definition field that references a Blueprint class, a skeletal mesh, or an
+animation asset must remain in a DataAsset, not a DataTable.
+
+There is no runtime JSON loader for game definitions. JSON import is a content-pipeline
+tool only (DataTable import in the editor).
 
 ---
 
