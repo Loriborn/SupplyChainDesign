@@ -112,7 +112,7 @@ guiding rule: **C++ owns structure and performance; Blueprint owns logic and aut
 - All `UPrimaryDataAsset` definition base classes with their field declarations
 - All `UInterface` capability contracts (`IDamageable`, `IModifiable`, etc.)
 - `AUnitManagerActor`, `ABuildingActor`, `AWorldObjectActor`, `ARealtimeMeshActor`
-- The simulation tick, HPA* pathfinding, spatial grid, modifier stack evaluation
+- The simulation tick, A* pathfinding (§12), spatial grid, modifier stack evaluation
 - `FFastArraySerializer` replication logic
 - All `UENUM(BlueprintType)` values
 - `UBlueprintFunctionLibrary` subclasses exposing simulation queries to Blueprint

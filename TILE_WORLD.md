@@ -693,9 +693,10 @@ server process; dedicated server mode runs headlessly. Both use identical simula
 
 ## Key Constraints (Tile/World Domain)
 
-- **Tiles are the world primitive; clusters are the pathfinding primitive.** Cluster edge
-  weights are derived from tile data and are per-unit-type. Tile data is never abstracted
-  away — it is the source of truth for all movement cost calculations.
+- **Tiles are the world primitive and the pathfinding primitive.** Pathfinding operates
+  directly on the tile grid via A\*; there is no coarser cluster or hierarchy layer. Tile
+  data is never abstracted away — it is the source of truth for all movement cost
+  calculations.
 - **Tiles have no height delta opinion.** Elevation traversal limits are declared entirely
   on unit types via `heightDeltaLimitDefault` and a per-tile-type override table.
 - **Elevation is an integer in height units.** Multiply by `World.heightScalar` for world-
