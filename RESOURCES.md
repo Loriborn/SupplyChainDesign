@@ -27,14 +27,14 @@ Objects, and optionally equipped into equipment slots on units and buildings.
 | `unit` | `FString` | Unit label (e.g. "kg", "units", "happiness") |
 | `abstract` | `bool` | If true, abstract resource; not carried or stored in inventory |
 | `storageScope` | `"player" \| "zone" \| "building_tag"` | **Abstract only** (UENUM) |
-| `storageBuildingTag` | `FName` | **Abstract, `building_tag` scope only.** `NAME_None` if unused. |
+| `storageBuildingTag` | `FGameplayTag` | **Abstract, `building_tag` scope only.** Empty tag if unused. |
 | `stackSize` | `int32` | **Physical only.** Max quantity per inventory slot |
-| `tags` | `TArray<FName>` | Classification labels. Queryable in `EventFilter` and `StepPrecondition`. See §3.5. |
+| `tags` | `FGameplayTagContainer` | Classification labels. Queryable in `EventFilter` and `StepPrecondition`. See §3.5. |
 | `worldObjectBehavior` | `TOptional<FWorldObjectBehavior>` | Defines behavior when dropped as a world entity; unset = cannot be dropped. See §16 |
 | `equippable` | `bool` | Whether this resource can be placed into an equipment slot |
-| `fitsSlotTypes` | `TArray<FName>` | **Equippable only.** Slot type names this resource fits into |
+| `fitsSlotTypes` | `FGameplayTagContainer` | **Equippable only.** Slot type tags this resource fits into |
 | `unitTypeConstraints` | `TArray<FName>` | **Equippable only.** If non-empty, only unit types with a matching id may equip this resource |
-| `tagConstraints` | `TArray<FName>` | **Equippable only.** The equipping entity must possess all listed tags |
+| `tagConstraints` | `FGameplayTagContainer` | **Equippable only.** The equipping entity must possess all listed tags |
 | `removable` | `bool` | **Equippable only.** Default `true`. If `false`, once equipped cannot be removed. Used for building upgrades. |
 | `modifiers` | `TArray<FModifierTemplate>` | **Equippable only.** Modifiers applied while this resource is equipped. See §13 in [Entities/Workers](ENTITIES_WORKERS.md) |
 | `exclusiveCarry` | `bool` | If `true`, a unit carrying this resource cannot carry other resources simultaneously |
@@ -83,7 +83,7 @@ FEventFilter {
   ZoneId:         FName
   OwnerId:        FName
   Radius:         float     // 0.0f = no radius filter
-  ResourceTag:    FName     // filter by resource tag; NAME_None = any
+  ResourceTag:    FGameplayTag  // filter by resource tag; empty tag = any
   // all non-None/non-zero fields are ANDed
 }
 ```
@@ -97,7 +97,7 @@ FStepPrecondition {
   Type:          "resource_has_tag"    // UENUM value
   Namespace:     "local" | "available"
   ResourceSlot:  FName    // resourceDefId of the slot to inspect
-  Tag:           FName    // the resource definition must have this tag
+  Tag:           FGameplayTag  // the resource definition must have this tag
 }
 ```
 
@@ -113,7 +113,7 @@ applying their modifier stacks and optionally enabling or disabling tasks.
 ```
 FEquipmentSlotInstance {
   SlotId:          FName               // matches a declared FEquipmentSlotDeclaration
-  SlotType:        FName
+  SlotType:        FGameplayTag
   EquippedDefId:   FName               // NAME_None = slot empty
   ModifierIds:     TArray<FName>       // ids of FModifiers currently applied by this equipment
 }
@@ -152,9 +152,9 @@ is instantiated into a live `FModifier` with a unique id.
 
 ```
 FModifierTemplate {
-  Tags:             TArray<FName>
-  GrantsTag:        FName               // NAME_None if not granting a tag
-  AttributeTarget:  FName               // NAME_None if tag/task-only
+  Tags:             FGameplayTagContainer
+  GrantsTag:        FGameplayTag        // empty tag if not granting a tag
+  AttributeTarget:  FName              // NAME_None if tag/task-only
   Operation:        "additive" | "multiplicative"    // UENUM
   Value:            float
   Duration:         float               // -1.0f = indefinite
@@ -193,7 +193,7 @@ destructible.
 FWorldObjectBehavior {
   bCanBePickedUp:             bool
   PickupUnitTypeConstraints:  TArray<FName>    // empty = any unit type may pick up
-  PickupTagConstraints:       TArray<FName>    // picking unit must have all these tags
+  PickupTagConstraints:       FGameplayTagContainer  // picking unit must have all these tags
   Timer:                      TOptional<FWorldObjectTimer>
   bAutoPickup:                bool             // default false
 }

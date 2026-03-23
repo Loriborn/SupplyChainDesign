@@ -128,7 +128,7 @@ Workers and combat units are the same type. Role is expressed entirely through f
 | `id` | `FName` | Unique identifier |
 | `name` | `FString` | Display name |
 | `icon` | `TSoftObjectPtr<UTexture2D>` | Visual representation |
-| `tags` | `TArray<FName>` | Classification labels (e.g. `"military"`, `"civilian"`, `"mounted"`) |
+| `tags` | `FGameplayTagContainer` | Classification labels (e.g. `Unit.Role.Military`, `Unit.Role.Civilian`, `Unit.Movement.Mounted`) |
 | `heightDeltaLimitDefault` | `float` | Max elevation change this unit type can traverse per tile edge when no per-tile-type override is defined |
 | `heightDeltaLimits` | `TArray<FHeightDeltaEntry>` | Per-tile-type override table; mirrors the `movementCosts` pattern |
 
@@ -246,8 +246,8 @@ Units declare named equipment slots that equippable resources may be placed into
 
 ```
 FEquipmentSlotDeclaration {
-  SlotId:    FName      // unique within this unit type e.g. "head", "body", "neck", "weapon"
-  SlotType:  FName      // matched against resource fitsSlotTypes
+  SlotId:    FName          // unique within this unit type e.g. "head", "body", "neck", "weapon"
+  SlotType:  FGameplayTag   // matched against resource fitsSlotTypes
   Label:     FString
 }
 ```
@@ -499,9 +499,9 @@ from any source (equipment, techs, events).
 FModifier {
   Id:               FName              // unique instance id
   SourceId:         FName              // who applied this (tech id, resource def id, event id)
-  Tags:             TArray<FName>      // queryable labels e.g. "cursed", "armour"
-  GrantsTag:        FName              // NAME_None if not granting a tag;
-                                       // e.g. MEDAL resource grants "ROYALTY" tag
+  Tags:             FGameplayTagContainer  // queryable labels e.g. Modifier.Cursed, Modifier.Armour
+  GrantsTag:        FGameplayTag          // empty tag if not granting a tag;
+                                          // e.g. MEDAL resource grants Unit.Status.Royalty
   AttributeTarget:  FName              // NAME_None if tag/task-only
   Operation:        "additive" | "multiplicative"    // UENUM
   Value:            float              // additive: flat delta; multiplicative: factor (0.1 = +10%)
@@ -627,7 +627,7 @@ EAbilityTargetType:
 FAbilityTargetConstraint {
   FactionStance:   "enemy" | "friendly" | "neutral" | "any"    // UENUM
   EntityTypes:     TArray<FName>    // "unit", "building", "world_object"; empty = any
-  RequiredTags:    TArray<FName>    // target must have ALL these tags
+  RequiredTags:    FGameplayTagContainer  // target must have ALL these tags
 }
 ```
 

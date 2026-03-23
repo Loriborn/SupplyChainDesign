@@ -18,7 +18,7 @@
 | `movementCostDefault` | `float` | Fallback pathing weight for unlisted unit types (1.0 = normal) |
 | `movementCosts` | `TArray<FMovementCostEntry>` | Per-unit-type cost overrides |
 | `allowedForBuilding` | `bool` | Default permission for building placement |
-| `tags` | `TArray<FName>` | Classification labels used by placement rule scripts |
+| `tags` | `FGameplayTagContainer` | Classification labels used by placement rule scripts |
 
 #### MovementCostEntry Struct
 
