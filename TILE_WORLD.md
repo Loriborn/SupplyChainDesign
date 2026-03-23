@@ -11,21 +11,21 @@
 
 | Field | Type | Description |
 |---|---|---|
-| `id` | `string` | Unique identifier |
-| `name` | `string` | Display name |
-| `icon` | `asset ref` | Visual representation |
+| `id` | `FName` | Unique identifier |
+| `name` | `FString` | Display name |
+| `icon` | `TSoftObjectPtr<UTexture2D>` | Visual representation |
 | `passable` | `bool` | Whether Units can traverse this tile at all (universal) |
 | `movementCostDefault` | `float` | Fallback pathing weight for unlisted unit types (1.0 = normal) |
-| `movementCosts` | `MovementCostEntry[]` | Per-unit-type cost overrides |
+| `movementCosts` | `TArray<FMovementCostEntry>` | Per-unit-type cost overrides |
 | `allowedForBuilding` | `bool` | Default permission for building placement |
-| `tags` | `string[]` | Classification labels used by placement rule scripts |
+| `tags` | `FGameplayTagContainer` | Classification labels used by placement rule scripts |
 
 #### MovementCostEntry Struct
 
 ```
-MovementCostEntry {
-  unitTypeId:  string
-  cost:        float
+FMovementCostEntry {
+  UnitTypeId:  FName
+  Cost:        float
 }
 ```
 
@@ -34,25 +34,21 @@ MovementCostEntry {
 2. Fall back to tile's `movementCostDefault`.
 3. Fall back to universal default `1.0`.
 
-#### TileCoord Struct
+#### TileCoord
 
-```
-TileCoord {
-  x:  int
-  y:  int
-}
-```
+Tile coordinates use `FIntPoint` (`X`, `Y`).
 
 ### 1.2 Tile Instance Struct (World State)
 
 | Field | Type | Description |
 |---|---|---|
-| `tileDefId` | `string` | Reference to Tile Definition |
-| `elevation` | `int` | Elevation of this cell in height units above the base datum (0 = water level). Multiply by `World.heightScalar` to get world-unit height. |
-| `occupantId` | `string \| null` | Building Actor occupying this cell, if any. Units never set this field — only buildings do. |
-| `zoneId` | `string \| null` | Zone this cell belongs to, if any. `null` = unclaimed; any player may build on unclaimed tiles unless a placement rule prevents it. |
+| `tileDefId` | `FName` | Reference to Tile Definition |
+| `elevation` | `int32` | Elevation of this cell in height units above the base datum (0 = water level). Multiply by `World.heightScalar` to get world-unit height. |
+| `occupantId` | `TOptional<FName>` | Building Actor occupying this cell, if any. Units never set this field — only buildings do. |
+| `archPassable` | `bool` | Set `true` by buildings that own this tile but leave the ground-level passage open (e.g. gatehouse arch tiles). When `true`, `occupantId != null` does not block ground-level pathing. Default `false`. |
+| `zoneId` | `TOptional<FName>` | Zone this cell belongs to, if any. Unset = unclaimed; any player may build on unclaimed tiles unless a placement rule prevents it. |
 
-Stored as flat array indexed by `y * mapWidth + x`.
+Stored as flat `TArray<FTileInstance>` indexed by `Y * MapWidth + X`.
 
 ### 1.3 Elevation & Pathfinding
 
@@ -81,13 +77,13 @@ Elevation also contributes an additive cost to passable edges, scaled by
 
 | Field | Type | Description |
 |---|---|---|
-| `mapWidth` | `int` | Map width in tiles |
-| `mapHeight` | `int` | Map height in tiles |
-| `tileSize` | `float` | Physical size of one tile in world units (UE: cm) |
-| `clusterSize` | `int` | Tiles per cluster edge for hierarchical pathfinding |
-| `heightScalar` | `float` | World-unit height per elevation integer unit. Multiply `TileInstance.elevation` by this to get world-unit height (e.g. UE: cm). Default: `100.0`. |
+| `mapWidth` | `int32` | Map width in tiles |
+| `mapHeight` | `int32` | Map height in tiles |
+| `tileSize` | `float` | Physical size of one tile in world units (cm) |
+| `clusterSize` | `int32` | Tiles per cluster edge for hierarchical pathfinding |
+| `heightScalar` | `float` | World-unit height per elevation integer unit. Multiply `TileInstance.elevation` by this to get world-unit height (cm). Default: `100.0`. |
 | `elevationCostFactor` | `float` | Scalar applied to elevation delta in edge cost formula. `0.0` = elevation costless but still blocks. `1.0` = 1 elevation unit = 1.0 added to edge cost. Default: `1.0` |
-| `pathBudgetPerTick` | `int` | Maximum path requests processed per simulation tick. Recommended range: 50–200 depending on map size and expected unit density. Prevents burst spikes on group move orders. |
+| `pathBudgetPerTick` | `int32` | Maximum path requests processed per simulation tick. Recommended range: 50–200 depending on map size and expected unit density. Prevents burst spikes on group move orders. |
 
 ---
 
@@ -104,7 +100,7 @@ receive `zoneId: null` (unclaimed).
 1. Author the zone map as a separate image asset alongside the tile heightmap.
 2. Define a colour-to-zone dictionary in the world definition:
    ```
-   ZoneColorEntry { color: color, zoneDefId: string }
+   FZoneColorEntry { Color: FLinearColor, ZoneDefId: FName }
    ```
 3. At world load, iterate every tile and set `TileInstance.zoneId` from the decoded entry.
 4. Tiles with `zoneId: null` are unclaimed. Any player may build on them unless a
@@ -122,26 +118,26 @@ tile. To change which zone a tile belongs to requires re-authoring and reloading
 
 | Field | Type | Description |
 |---|---|---|
-| `id` | `string` | Unique identifier |
-| `name` | `string` | Display name |
-| `color` | `color` | Map overlay color |
-| `startingOwnerId` | `string \| null` | Owning player or faction at world start |
+| `id` | `FName` | Unique identifier |
+| `name` | `FString` | Display name |
+| `color` | `FLinearColor` | Map overlay color |
+| `startingOwnerId` | `TOptional<FName>` | Owning player or faction at world start; unset = unclaimed |
 
 ### 2.2 Zone Instance (World State)
 
 | Field | Type | Description |
 |---|---|---|
-| `zoneDefId` | `string` | Reference to Zone Definition |
-| `currentOwnerId` | `string \| null` | Current owner; `null` = unclaimed |
-| `scopedInventory` | `ScopedInventorySlot[]` | Zone-level abstract resource quantities |
+| `zoneDefId` | `FName` | Reference to Zone Definition |
+| `currentOwnerId` | `TOptional<FName>` | Current owner; unset = unclaimed |
+| `scopedInventory` | `TArray<FScopedInventorySlot>` | Zone-level abstract resource quantities |
 
 ### 2.3 Zone-Scoped Resources
 
 ```
-ScopedInventorySlot {
-  resourceDefId:  string
-  quantity:       float
-  capacity:       float     // -1 = uncapped
+FScopedInventorySlot {
+  ResourceDefId:  FName
+  Quantity:       float
+  Capacity:       float     // -1.0f = uncapped
 }
 ```
 
@@ -162,14 +158,14 @@ Resources with `abstract: true` and `storageScope: "zone"` accumulate here. See
 ### 2.5 Zone Objectives
 
 ```
-ZoneObjective {
-  id:              string
-  zoneId:          string
-  description:     string
-  resourceDefId:   string
-  targetQuantity:  float
-  scope:           "available_inventory" | "scoped_inventory" | "either"
-  completionEvent: GameEventRef
+FZoneObjective {
+  Id:              FName
+  ZoneId:          FName
+  Description:     FString
+  ResourceDefId:   FName
+  TargetQuantity:  float
+  Scope:           "available_inventory" | "scoped_inventory" | "either"    // UENUM
+  CompletionEvent: FName    // GameEventRef — id of an EventDefinition
 }
 ```
 
@@ -197,60 +193,62 @@ Nothing is cached outside of World state.
 
 | Field | Type | Description |
 |---|---|---|
-| `mapWidth` | `int` | Map width in tiles |
-| `mapHeight` | `int` | Map height in tiles |
-| `tileSize` | `float` | World-unit size of one tile (UE: cm) |
-| `clusterSize` | `int` | Tiles per cluster edge |
+| `mapWidth` | `int32` | Map width in tiles |
+| `mapHeight` | `int32` | Map height in tiles |
+| `tileSize` | `float` | World-unit size of one tile (cm) |
+| `clusterSize` | `int32` | Tiles per cluster edge |
 | `heightScalar` | `float` | See §1.4 |
 | `elevationCostFactor` | `float` | See §1.4 |
-| `pathBudgetPerTick` | `int` | See §1.4 |
-| `tiles` | `TileInstance[]` | Flat array; index = `y * mapWidth + x` |
-| `clusterGraph` | `ClusterGraph` | Hierarchical pathfinding graph; see §12 |
-| `pathRequestQueue` | `PathRequest[]` | Pending pathfinding requests |
-| `zones` | `ZoneInstance[]` | All zone instances |
-| `buildingActors` | `BuildingActor[]` | All placed buildings |
-| `unitActors` | `UnitActor[]` | All active units (managed by `AUnitManagerActor`) |
-| `worldObjectActors` | `WorldObjectActor[]` | All active world objects (dropped items, relics, etc.) |
-| `playerStateActors` | `PlayerStateActor[]` | One per player; holds player-scoped abstract resources |
-| `activeTechs` | `ActiveTech[]` | Technologies currently in effect |
+| `pathBudgetPerTick` | `int32` | See §1.4 |
+| `tiles` | `TArray<FTileInstance>` | Flat array; index = `Y * MapWidth + X` |
+| `clusterGraph` | `FClusterGraph` | Ground-level hierarchical pathfinding graph; see §12 |
+| `elevatedGraph` | `FElevatedNavGraph` | Sparse elevated navigation graph; see §12.9 |
+| `pathRequestQueue` | `TArray<FPathRequest>` | Pending pathfinding requests |
+| `zones` | `TArray<FZoneInstance>` | All zone instances |
+| `buildingActors` | `TArray<ABuildingActor*>` | All placed buildings |
+| `unitActors` | `TArray<FUnitState>` | All active units (owned by `AUnitManagerActor`) |
+| `worldObjectActors` | `TArray<AWorldObjectActor*>` | All active world objects |
+| `playerStateActors` | `TArray<FPlayerStateData>` | One per player; player-scoped abstract resources |
+| `activeTechs` | `TArray<FActiveTech>` | Technologies currently in effect |
 | `clock` | `float` | Simulation time elapsed in seconds |
-| `eventQueue` | `GameEvent[]` | Pending events |
-| `eventFlags` | `Map<string, bool>` | Named boolean flags |
-| `objectives` | `ZoneObjective[]` | Active objectives |
+| `eventQueue` | `TArray<FGameEvent>` | Pending events |
+| `eventFlags` | `TMap<FName, bool>` | Named boolean flags |
+| `objectives` | `TArray<FZoneObjective>` | Active objectives |
 
-**Time model:** Delta time per frame (UE: `DeltaSeconds`), framerate-agnostic. Speed multiplier
-applied as scalar on delta time. Python demo uses fixed delta time per loop iteration.
+**Time model:** Delta time per frame (`DeltaSeconds`), framerate-agnostic. Speed multiplier
+applied as scalar on delta time.
 
 ### 7.1 Supporting Structs
 
-**`ResourceCost`** — a quantity of a specific resource required or consumed by a system
+**`FResourceCost`** — a quantity of a specific resource required or consumed by a system
 operation (construction cost, tech cost, etc.):
 
 ```
-ResourceCost {
-  resourceDefId:  string
-  quantity:       int
+FResourceCost {
+  ResourceDefId:  FName
+  Quantity:       int32
 }
 ```
 
-**`GameEventRef`** — a string reference to a named `EventDefinition` id. Used wherever a
-system hook needs to fire a designer-authored event:
-
-```
-GameEventRef = string    // the id of an EventDefinition
-```
+**`GameEventRef`** — an `FName` referencing a named `EventDefinition` id. `NAME_None` = no
+event.
 
 ### 7.2 Player State Actor
 
 The **Player State Actor** is a non-spatial, per-player data container that accumulates
-abstract resources scoped to a player globally (i.e. not zone- or building-specific).
-It has no tile footprint and is not placed on the map. One instance exists per player
-for the lifetime of the simulation session.
+abstract resources scoped to a player globally (not zone- or building-specific). It has no
+tile footprint. One instance exists per player for the simulation session.
 
 ```
-PlayerStateActor {
-  playerId:          string
-  abstractInventory: AbstractInventorySlot[]
+FPlayerStateData {
+  PlayerId:          FName
+  AbstractInventory: TArray<FAbstractInventorySlot>
+}
+
+FAbstractInventorySlot {
+  ResourceDefId:  FName
+  Quantity:       float
+  Capacity:       float    // -1.0f = uncapped
 }
 ```
 
@@ -269,41 +267,33 @@ and rejected because per-tile movement costs (grass vs stone per unit type) brea
 simplification assumptions. **HPA\*** operates on a coarser cluster graph; local A* within
 each cluster uses full tile cost data.
 
-### 12.2 ClusterCoord Struct
+### 12.2 ClusterCoord
 
-```
-ClusterCoord {
-  x:  int
-  y:  int
-}
-```
+Cluster coordinates use `FIntPoint` (`X`, `Y`).
 
 ### 12.3 Cluster Graph
 
 ```
-ClusterGraph {
-  clusters:  Cluster[][]    // [clusterY][clusterX]
+FClusterGraph {
+  Clusters:  TArray<TArray<FCluster>>    // [ClusterY][ClusterX]
 }
 
-Cluster {
-  coord:      ClusterCoord
-  dirty:      bool               // triggers edge recomputation next tick
-  edges:      ClusterEdge[]
-  boundaries: ClusterBoundary[]  // one per adjacent cluster; populated at init / recompute
+FCluster {
+  Coord:      FIntPoint
+  bDirty:     bool                         // triggers edge recomputation next tick
+  Edges:      TArray<FClusterEdge>
+  Boundaries: TArray<FClusterBoundary>     // one per adjacent cluster
 }
 
-ClusterEdge {
-  targetCluster:  ClusterCoord
-  costs:          ClusterEdgeCost[]   // pre-computed per unit type
-  impassableFor:  string[]            // unitTypeIds that cannot cross this boundary;
-                                       // accounts for movement cost and the unit's own
-                                       // resolvedHeightDeltaLimit for the boundary tiles
+FClusterEdge {
+  TargetCluster:  FIntPoint
+  Costs:          TArray<FClusterEdgeCost>    // pre-computed per unit type
+  ImpassableFor:  TArray<FName>               // unitTypeIds that cannot cross this boundary
 }
 
-ClusterEdgeCost {
-  unitTypeId:  string
-  cost:        float    // pre-computed traversal cost incorporating tile movement costs
-                        // and elevation deltas at the cluster boundary
+FClusterEdgeCost {
+  UnitTypeId:  FName
+  Cost:        float    // pre-computed traversal cost (tile movement costs + elevation)
 }
 ```
 
@@ -323,24 +313,22 @@ column of the right cluster). Diagonal cluster adjacency is not used — boundar
 axis-aligned only.
 
 ```
-ClusterBoundary {
-  neighborCluster:  ClusterCoord     // the cluster on the other side of this boundary
-  direction:        "north" | "south" | "east" | "west"
-  entryPoints:      EntryPoint[]     // passable crossing points along this shared edge
+FClusterBoundary {
+  NeighborCluster:  FIntPoint                     // cluster on the other side of this boundary
+  Direction:        "north" | "south" | "east" | "west"    // UENUM
+  EntryPoints:      TArray<FEntryPoint>
 }
 
-EntryPoint {
-  tileA:    TileCoord    // tile on this cluster's side of the boundary
-  tileB:    TileCoord    // tile on the neighbor cluster's side (adjacent to tileA)
-  intraClusterCosts: IntraClusterCost[]  // cost from this entry point to every other
-                                          // entry point within the same cluster
+FEntryPoint {
+  TileA:               FIntPoint                  // tile on this cluster's side of the boundary
+  TileB:               FIntPoint                  // tile on the neighbor cluster's side
+  IntraClusterCosts:   TArray<FIntraClusterCost>  // cost from this entry point to every other
 }
 
-IntraClusterCost {
-  toEntryPointIndex:  int     // index into the same ClusterBoundary's entryPoints array,
-                               // or cross-referenced by global id; implementation detail
-  unitTypeId:         string
-  cost:               float   // local A* cost within the cluster between the two points
+FIntraClusterCost {
+  ToEntryPointIndex:  int32     // index into same FClusterBoundary's EntryPoints array
+  UnitTypeId:         FName
+  Cost:               float     // local A* cost within the cluster between the two points
 }
 ```
 
@@ -381,12 +369,12 @@ dirty clusters are re-queued. Unaffected units keep their paths.
 ### 12.6 Path Request Queue
 
 ```
-PathRequest {
-  unitActorId:   string
-  destination:   TileCoord
-  priority:      int          // higher = processed sooner this tick; caller-assigned
-                              // Suggested convention: player_command=100, task=50, background=10
-  requestedAt:   float        // world clock time; secondary sort key when priority is equal
+FPathRequest {
+  UnitActorId:   FName
+  Destination:   FIntPoint    // tile coord
+  Priority:      int32        // higher = processed sooner; caller-assigned
+                               // Convention: player_command=100, task=50, background=10
+  RequestedAt:   float        // world clock time; secondary sort key when priority is equal
 }
 ```
 
@@ -412,7 +400,9 @@ edgeCost = resolvedMovementCost(unitTypeId, destTile)
 
 Edge rejected (impassable) if:
 - `destTile.passable == false`
-- `destTile.occupantId != null`  ← any building occupant makes the tile fully impassable;
+- `destTile.occupantId != null && !destTile.archPassable`  ← any building occupant makes
+                                     the tile impassable unless the building explicitly
+                                     declares it ground-passable (e.g. gatehouse arch tiles);
                                      units never set `occupantId` and never block tiles
 - `abs(destTile.elevation - srcTile.elevation) > resolvedHeightDeltaLimit(unitTypeId, destTile)`
 
@@ -454,6 +444,315 @@ Units advance along `localPath` by `effectiveMovementSpeed * deltaTime` per tick
 On cluster boundary reached: next cluster's `localPath` computed on demand.
 Units overlap freely; no reservation or avoidance system.
 
+### 12.9 Elevated Navigation (Verticality)
+
+The ground HPA\* graph (§12.3) covers the full tile grid at ground level. When wall
+structures, towers, or gatehouses are placed, a second sparse nav graph — the **elevated
+graph** — is built from those buildings' elevated-surface tiles.
+
+The two graphs are fully independent. A unit belongs to exactly one at any time,
+tracked by `FUnitState.currentNavLayer` and `FUnitState.currentElevatedComponentId`.
+
+#### Elevated Graph Structure
+
+The elevated graph is **not** a full parallel tile grid. It is a sparse collection of
+connected components — one per disconnected wall chain. A wall chain is any group of
+elevated-surface tiles reachable from one another without descending to ground. Each
+component runs its own HPA\* cluster graph, built identically to §12.3 but scoped to
+that component's tiles only.
+
+```
+FElevatedNavGraph {
+  Components:    TArray<FElevatedComponent>
+  Transitions:   TArray<FNavTransition>       // indexed by tile coord for fast lookup
+}
+
+FElevatedComponent {
+  Id:            FName                        // stable until graph rebuild
+  TileSet:       TArray<FIntPoint>            // all tiles belonging to this wall chain
+  ClusterGraph:  FClusterGraph                // HPA* graph scoped to TileSet
+}
+```
+
+#### Transition Tiles
+
+Stair and ramp buildings register specific footprint tiles as ground↔elevated transitions
+via `elevatedTransitionCells` (see [Buildings/Jobs §4.1.2](BUILDINGS_JOBS.md)). Each
+produces an `FNavTransition` linking a ground-layer tile to an elevated component tile.
+
+```
+FNavTransition {
+  GroundTile:         FIntPoint
+  ElevatedTile:       FIntPoint
+  ComponentId:        FName       // which elevated component this connects to
+  Cost:               float       // traversal cost to change levels
+}
+```
+
+Transitions are the only mechanism connecting the two graphs. A unit on a wall chain
+can only reach ground by pathing to a transition tile and crossing it.
+
+#### Unit Nav Layer State
+
+`FUnitState` gains:
+
+| Field | Type | Description |
+|---|---|---|
+| `currentNavLayer` | `"ground" \| "elevated"` | Which graph this unit currently belongs to |
+| `currentElevatedComponentId` | `TOptional<FName>` | Elevated component ID; `NAME_None` when on ground |
+
+Path queries include source and destination layer. If a unit on an elevated component
+needs to reach a ground-layer target, the abstract path must include a transition edge
+to descend. Visual Z for a unit on an elevated surface is derived from the `wallElevation`
+value on the building definition occupying that tile (see [Buildings/Jobs §4.1.2](BUILDINGS_JOBS.md)).
+
+#### Graph Invalidation on Demolition
+
+When a wall-type building is demolished:
+
+1. Its tiles are removed from the elevated component's `TileSet`.
+2. A flood-fill over remaining tiles determines whether the component stays connected or
+   splits into two or more disconnected components.
+3. Split components are assigned new `Id` values and re-registered.
+4. Units on components that are now entirely disconnected from any transition tile are
+   flagged as stranded; the game logic layer is responsible for handling this case
+   (e.g. forcing a teleport to ground, triggering an event, or treating the unit as lost).
+5. Ground clusters overlapping the demolished footprint are marked dirty per §12.5.
+
+#### Variable Wall Heights
+
+Wall height is a visual and gameplay property of the building definition (`wallElevation`),
+not a nav property. Two adjacent wall segments at different heights are nav-disconnected
+unless a stair building explicitly bridges them — the nav graph encodes this naturally
+since stairs are the sole source of transition edges. Actual Z height matters for:
+- Rendering (unit visual Z offset on the elevated surface)
+- Attack range and line-of-sight calculations (elevation advantage)
+- Determining which stair types are valid connectors between height levels
+
+The HPA\* graphs require no knowledge of actual Z height — only tile connectivity.
+
+---
+
+## 17. Terrain Rendering
+
+Tiles are pure simulation data (§1). The world tile grid has no associated mesh or world
+actor. The visible terrain surface is a procedural mesh managed by the
+**RealtimeMeshComponent** (RMC), a third-party UE5 plugin by TriAxis Games.
+
+### 17.1 Chunking
+
+The terrain mesh is divided into chunks — one per zone or one per fixed NxN tile region.
+Matching chunk boundaries to `clusterSize` is recommended so cluster dirty events can
+double as chunk dirty flags. Each chunk is an independent `ARealtimeMeshActor`. Only the
+chunk(s) covering changed tiles are regenerated; all other chunks are untouched.
+
+### 17.2 Tile Height
+
+Each chunk vertex is positioned at world-unit height `TileInstance.elevation * World.heightScalar`.
+Terrain geometry is regenerated from live tile data whenever tiles in the chunk are modified.
+
+### 17.3 Tile Type → Material
+
+Tile visual type (grass, stone, sand, etc.) is encoded as a per-vertex **material blend
+index** written into a UV channel, not vertex colors. A single terrain material samples a
+texture array by index, with interpolated UV values providing smooth blending between
+adjacent tile types. This approach:
+
+- Avoids vertex color instability (no Nanite dependency, no cluster-boundary flicker)
+- Supports smooth tile-type transitions without additional geometry
+- Is forward-compatible with future rendering pipeline changes
+
+### 17.4 Building Footprint Flattening
+
+When a building is placed, the terrain chunk(s) under its footprint are regenerated with
+all footprint-tile vertices forced to a uniform height. The target height is
+designer-configurable per building definition (average of footprint elevations, minimum,
+or a fixed offset). This is a **visual-only operation** — `TileInstance.elevation` data
+is not modified. When the building is demolished the chunk regenerates from original tile
+elevation data.
+
+### 17.5 Collision
+
+The terrain mesh carries **no physics collision**. Units path via the mathematical tile
+graph (§12); no world-space mesh raycasts are performed for unit movement. Visual-only
+physics (particle collision, cosmetic debris) may use a lightweight collision
+representation if needed, configured independently from the navigation system.
+
+### 17.6 Plugin Dependency
+
+RMC is not an Epic-shipped plugin. Engine minor version upgrades (5.5 → 5.7) may lag RMC
+release support — verify compatibility before committing to an engine upgrade. The free
+RMC Core version covers all terrain needs described here; the Pro spatial-loading system
+is not required for this use case.
+
+---
+
+## 19. Spatial Unit Index
+
+Unit actors are managed by `AUnitManagerActor` as a flat `TArray<FUnitState>`. At 1000+
+units, naive O(n) scans for proximity queries — auto-engage detection, ability radius
+targeting, adjacency bonus evaluation — are prohibitively expensive. The unit manager
+maintains a **spatial unit grid**: a derived acceleration structure updated incrementally
+as units move. It is not part of canonical `World` state and is neither replicated nor
+persisted.
+
+### 19.1 Grid Structure
+
+```
+// Maintained by AUnitManagerActor. Derived from unit positions; not in World state.
+FSpatialUnitGrid {
+  CellTilesWide:  int32                    // tiles per cell in X; default 1
+  CellTilesHigh:  int32                    // tiles per cell in Y; default 1
+  GridW:          int32                    // = ceil(mapWidth  / CellTilesWide)
+  GridH:          int32                    // = ceil(mapHeight / CellTilesHigh)
+  Cells:          TArray<TArray<FName>>    // [cellY * GridW + cellX] → unit IDs in this cell
+}
+```
+
+With `CellTilesWide = CellTilesHigh = 1` (the default), each cell corresponds to exactly
+one tile. Larger cell sizes reduce per-move update cost at the expense of a slightly wider
+query envelope — tune if unit density per tile is consistently low.
+
+### 19.2 Update Policy
+
+The grid is updated when a unit's **cell coordinates change**, not on every position delta.
+A unit's current cell is:
+
+```
+cellX = floor(position.X / (world.tileSize * CellTilesWide))
+cellY = floor(position.Y / (world.tileSize * CellTilesHigh))
+```
+
+When these change from one tick to the next, the unit is removed from the old cell and
+inserted into the new cell. Units that stay within the same cell incur zero grid maintenance
+cost that tick. On `on_unit_death`, the unit is removed from its cell immediately before
+being removed from `World.unitActors`.
+
+### 19.3 Proximity Query
+
+```
+FSpatialQueryFilter {
+  RequesterId:    FName
+  FactionStance:  "enemy" | "friendly" | "neutral" | "any"    // relative to RequesterId
+  RequiredTags:   TArray<FName>    // result units must have ALL these tags
+  ExcludedTags:   TArray<FName>    // result units must have NONE of these tags
+}
+
+// Returns unit IDs within tileRadius tiles of centerTile matching filter
+TArray<FName> getUnitsInRadius(centerTile: FIntPoint, tileRadius: int32,
+                                filter: FSpatialQueryFilter)
+```
+
+**Algorithm:**
+
+1. Compute cell range: `[cx ± ceil(tileRadius / CellTilesWide)] × [cy ± ceil(tileRadius / CellTilesHigh)]`
+2. Collect all unit IDs from cells in range (the square envelope).
+3. Discard units whose actual Chebyshev tile distance from `centerTile` exceeds `tileRadius`
+   (square-to-circle cull).
+4. Apply `filter` (faction stance via `ownerId → factionId → relationship`;
+   tags via `hasEntityTag`).
+
+For typical combat ranges (1–4 tiles), step 1 touches at most 81 cells each holding O(1–5)
+units — far cheaper than O(n) over 1000+ unit actors.
+
+### 19.4 Building Proximity
+
+Buildings do not move. Their proximity is resolved directly from tile data: iterate tiles
+in a bounding square around the query origin and check `TileInstance.occupantId`. This is
+O(r²) tile reads, which is acceptable because building queries are infrequent (placement,
+demolition, adjacency evaluation) and tiles are small, cache-friendly structs.
+
+---
+
+## 22. Network & Multiplayer Model
+
+Bastion uses a **server-authoritative** model. The full simulation runs on the server
+(listen or dedicated). Clients are display and input nodes — they do not simulate the
+economy or pathfinding and cannot write authoritative world state.
+
+### 22.1 Authority Model
+
+| System | Authority | Client receives |
+|---|---|---|
+| Economy (tasks, resources, inventory) | Server only | Summary quantities at reduced rate |
+| Unit positions & state | Server; replicated | Positions within relevance range |
+| Combat (damage, health) | Server only | Health values after resolution |
+| Pathfinding | Server only | Not replicated; clients interpolate received positions |
+| Zone ownership | Server | Replicated to all clients |
+| Adjacency & modifier stacks | Server only | Net attribute values where needed for UI |
+| Player commands | Client → Server | Applied by server; no client-side prediction |
+
+### 22.2 Player Commands
+
+Client input is transmitted as lightweight command structs. The server applies commands on
+the next available simulation tick.
+
+```
+FPlayerCommand {
+  Type:          EPlayerCommandType
+  IssuerId:      FName
+  UnitIds:       TArray<FName>           // units involved
+  TargetId:      TOptional<FName>        // target entity (attack, assign)
+  TargetTile:    TOptional<FIntPoint>    // target position (move, build)
+  AbilityDefId:  TOptional<FName>
+  BuildingDefId: TOptional<FName>
+  Rotation:      TOptional<int32>        // for build commands
+  ClientTime:    float                   // diagnostic only; server does not use for simulation
+}
+
+EPlayerCommandType:
+  Move | AttackTarget | AttackMove | Assign | Unassign |
+  Build | Demolish | UseAbility | PickupWorldObject    // UENUM
+```
+
+Commands are queued per-player on the server and processed at the start of each simulation
+tick. Invalid commands (targeting an unowned unit, building in an unowned zone) are silently
+discarded.
+
+### 22.3 Bandwidth Reduction
+
+**Relevance culling:** Unit position updates are sent to a client only when the unit is
+within a configurable radius of that player's camera focus or lord actor. Units outside
+the relevance region are not replicated that tick; clients hold the last received position.
+
+**Variable replication rate:** Units close to a player replicate every tick (full rate).
+Units near the outer relevance boundary replicate every Nth tick. Rate tiers are
+configurable via `World.replicationRateTiers`.
+
+**Economy replication is coarse:** Building task states and resource quantities replicate
+to the owning player only at a coarse interval (default 2–5 seconds). Full per-tick
+replication of every building's inventory is unnecessary — players observe the economy
+through UI summaries. Abstract resources (player- and zone-scoped) replicate on the same
+coarse schedule.
+
+**`FFastArraySerializer`** on `AUnitManagerActor.unitActors` handles delta-serialization
+of the unit state array, sending only changed entries each replication frame.
+
+### 22.4 Simulation Determinism
+
+The simulation is **not required to be deterministic** across clients. Clients do not run
+the simulation, so identical floating-point results across machines are unnecessary. The
+server's output (positions, health, resource counts) is authoritative; clients interpolate
+received values visually.
+
+The `lateralBias` hash (§12.7) is deterministic by design for **server-side** replay
+reproducibility and bug reproduction. It has no multiplayer correctness requirement.
+
+### 22.5 Session Configuration
+
+```
+FNetworkSessionConfig {
+  Mode:              "listen" | "dedicated"    // UENUM
+  MaxPlayers:        int32
+  TickRate:          int32     // Hz; recommended 20–30
+  RelevanceRadius:   float     // tiles; default 80
+  EconomyReplicRate: float     // seconds per economy push; default 3.0
+}
+```
+
+No peer-to-peer model is supported. Listen server mode co-locates one player with the
+server process; dedicated server mode runs headlessly. Both use identical simulation code.
+
 ---
 
 ## Key Constraints (Tile/World Domain)
@@ -466,7 +765,8 @@ Units overlap freely; no reservation or avoidance system.
 - **Elevation is an integer in height units.** Multiply by `World.heightScalar` for world-
   unit height. There is no float precision concern at the tile level.
 - **Only buildings block tiles.** `TileInstance.occupantId` is only ever set by a building
-  actor. Units never set it and never block pathfinding.
+  actor. Units never set it and never block pathfinding. A tile with `archPassable: true`
+  is ground-passable despite having an occupant (e.g. gatehouse arch tiles).
 - **Cluster boundaries use one entry point per contiguous passable run.** This is the
   standard HPA* approximation. All inter-cluster pathfinding passes through entry points.
 - **Path requests are queued and prioritized.** Priority is caller-set; the recommended
@@ -480,3 +780,24 @@ Units overlap freely; no reservation or avoidance system.
   authored colour map image. Tiles do not change zones mid-session; only ownership changes.
 - **Placement rules are evaluated at placement time only.** Already-placed buildings are
   not re-validated if surrounding world state changes.
+- **Elevated navigation is a sparse second graph, not a full tile layer.** The elevated
+  graph is built only from tiles where wall-type buildings have been placed. It is
+  naturally fragmented into one connected component per disconnected wall chain.
+- **Transition tiles are the only ground↔elevated connection.** Stair and ramp buildings
+  register specific footprint cells as transitions. Units cannot change nav layers except
+  at these tiles.
+- **Wall height is a building property, not a nav property.** Two wall segments at
+  different heights are nav-disconnected unless a stair explicitly bridges them.
+  `wallElevation` is used for visual Z positioning and combat calculations only.
+- **Terrain mesh is visual only.** The RMC terrain mesh carries no physics collision and
+  is not used for unit pathing. Tile elevation data is the authoritative source for all
+  movement calculations. Footprint flattening on building placement is a visual operation
+  only — tile elevation data is not modified.
+- **The spatial unit grid is derived, not authoritative.** `FSpatialUnitGrid` is maintained
+  by `AUnitManagerActor` as an acceleration structure. It is not part of `World` state,
+  not replicated, and not persisted. It is rebuilt or updated incrementally from unit
+  positions. Proximity queries go through it, never through O(n) unit actor scans.
+- **Clients do not simulate.** All economy, combat, pathfinding, and skill resolution runs
+  server-side. Clients receive replicated state within their relevance radius and interpolate
+  positions visually. Player input is transmitted as `FPlayerCommand` structs and applied
+  by the server.

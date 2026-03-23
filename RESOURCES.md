@@ -21,23 +21,23 @@ Objects, and optionally equipped into equipment slots on units and buildings.
 
 | Field | Type | Description |
 |---|---|---|
-| `id` | `string` | Unique identifier |
-| `name` | `string` | Display name |
-| `icon` | `asset ref` | Visual representation |
-| `unit` | `string` | Unit label (e.g. "kg", "units", "happiness") |
+| `id` | `FName` | Unique identifier |
+| `name` | `FString` | Display name |
+| `icon` | `TSoftObjectPtr<UTexture2D>` | Visual representation |
+| `unit` | `FString` | Unit label (e.g. "kg", "units", "happiness") |
 | `abstract` | `bool` | If true, abstract resource; not carried or stored in inventory |
-| `storageScope` | `"player" \| "zone" \| "building_tag"` | **Abstract only** |
-| `storageBuildingTag` | `string?` | **Abstract, `building_tag` scope only** |
-| `stackSize` | `int` | **Physical only.** Max quantity per inventory slot |
-| `tags` | `string[]` | Classification labels. Queryable in `EventFilter` (filter by resource tag) and `StepPrecondition` (preconditions that test resource tags). See §3.5. |
-| `worldObjectBehavior` | `WorldObjectBehavior \| null` | Defines behavior when this resource exists as a dropped world entity; `null` = cannot be dropped. See §16 |
+| `storageScope` | `"player" \| "zone" \| "building_tag"` | **Abstract only** (UENUM) |
+| `storageBuildingTag` | `FGameplayTag` | **Abstract, `building_tag` scope only.** Empty tag if unused. |
+| `stackSize` | `int32` | **Physical only.** Max quantity per inventory slot |
+| `tags` | `FGameplayTagContainer` | Classification labels. Queryable in `EventFilter` and `StepPrecondition`. See §3.5. |
+| `worldObjectBehavior` | `TOptional<FWorldObjectBehavior>` | Defines behavior when dropped as a world entity; unset = cannot be dropped. See §16 |
 | `equippable` | `bool` | Whether this resource can be placed into an equipment slot |
-| `fitsSlotTypes` | `string[]` | **Equippable only.** Slot type strings this resource fits into |
-| `unitTypeConstraints` | `string[]` | **Equippable only.** If non-empty, only unit types with a matching id may equip this resource |
-| `tagConstraints` | `string[]` | **Equippable only.** The equipping entity must possess all listed tags (definition tags + modifier-granted tags) |
-| `removable` | `bool` | **Equippable only.** Default `true`. If `false`, once equipped this resource cannot be removed. Used for building upgrades placed via tasks or events. |
-| `modifiers` | `ModifierTemplate[]` | **Equippable only.** Modifiers applied to the equipping entity while this resource is equipped. Task enable/disable is expressed within each `ModifierTemplate`. See §13 in [Entities/Workers](ENTITIES_WORKERS.md) |
-| `exclusiveCarry` | `bool` | If `true`, a unit carrying this resource cannot simultaneously carry other resources |
+| `fitsSlotTypes` | `FGameplayTagContainer` | **Equippable only.** Slot type tags this resource fits into |
+| `unitTypeConstraints` | `TArray<FName>` | **Equippable only.** If non-empty, only unit types with a matching id may equip this resource |
+| `tagConstraints` | `FGameplayTagContainer` | **Equippable only.** The equipping entity must possess all listed tags |
+| `removable` | `bool` | **Equippable only.** Default `true`. If `false`, once equipped cannot be removed. Used for building upgrades. |
+| `modifiers` | `TArray<FModifierTemplate>` | **Equippable only.** Modifiers applied while this resource is equipped. See §13 in [Entities/Workers](ENTITIES_WORKERS.md) |
+| `exclusiveCarry` | `bool` | If `true`, a unit carrying this resource cannot carry other resources simultaneously |
 
 ### 3.3 Abstract Storage
 
@@ -77,28 +77,27 @@ with `resourceTag: "sacred"` on an `on_world_object_pickup` hook fires only when
 resource is collected.
 
 ```
-EventFilter {
-  buildingDefId:  string?
-  unitTypeDefId:  string?
-  zoneId:         string?
-  ownerId:        string?
-  radius:         float?
-  resourceTag:    string?     // NEW: filter by resource tag (single tag; all specified
-                               //      filters are ANDed as usual)
+FEventFilter {
+  BuildingDefId:  FName     // NAME_None = any
+  UnitTypeDefId:  FName
+  ZoneId:         FName
+  OwnerId:        FName
+  Radius:         float     // 0.0f = no radius filter
+  ResourceTag:    FGameplayTag  // filter by resource tag; empty tag = any
+  // all non-None/non-zero fields are ANDed
 }
 ```
 
-**Step preconditions:** `StepPrecondition` supports a `"resource_has_tag"` type that tests
-whether a resource in a specified slot bears a given tag. This allows task steps to behave
-differently based on what category of resource is present.
+**Step preconditions:** `FStepPrecondition` supports a `"resource_has_tag"` type that tests
+whether a resource in a specified slot bears a given tag.
 
 ```
-StepPrecondition {
+FStepPrecondition {
   // existing types ...
-  type: "resource_has_tag"
-  namespace:     "local" | "available"
-  resourceSlot:  string       // resourceDefId of the slot to inspect
-  tag:           string       // the resource definition must have this tag
+  Type:          "resource_has_tag"    // UENUM value
+  Namespace:     "local" | "available"
+  ResourceSlot:  FName    // resourceDefId of the slot to inspect
+  Tag:           FGameplayTag  // the resource definition must have this tag
 }
 ```
 
@@ -112,11 +111,11 @@ applying their modifier stacks and optionally enabling or disabling tasks.
 ### 14.1 Equipment Slot Instance (Runtime)
 
 ```
-EquipmentSlotInstance {
-  slotId:          string            // matches a declared EquipmentSlotDeclaration
-  slotType:        string
-  equippedDefId:   string | null     // resource def id currently in this slot
-  modifierIds:     string[]          // ids of Modifiers currently applied by this equipment
+FEquipmentSlotInstance {
+  SlotId:          FName               // matches a declared FEquipmentSlotDeclaration
+  SlotType:        FGameplayTag
+  EquippedDefId:   FName               // NAME_None = slot empty
+  ModifierIds:     TArray<FName>       // ids of FModifiers currently applied by this equipment
 }
 ```
 
@@ -149,18 +148,19 @@ If `resource.removable == false`, unequip is blocked. Otherwise:
 ### 14.4 ModifierTemplate
 
 Equipment and technologies declare modifiers as templates. At application time, a template
-is instantiated into a live `Modifier` with a unique `id`.
+is instantiated into a live `FModifier` with a unique id.
 
 ```
-ModifierTemplate {
-  tags:             string[]
-  grantsTag:        string | null
-  attributeTarget:  string | null
-  operation:        "additive" | "multiplicative"
-  value:            float
-  duration:         float | "indefinite"
-  enablesTasks:     string[]
-  disablesTasks:    string[]
+FModifierTemplate {
+  Tags:             FGameplayTagContainer
+  GrantsTag:        FGameplayTag        // empty tag if not granting a tag
+  AttributeTarget:  FName              // NAME_None if tag/task-only
+  Operation:        "additive" | "multiplicative"    // UENUM
+  Value:            float
+  Duration:         float               // -1.0f = indefinite
+  EnablesTasks:     TArray<FName>
+  DisablesTasks:    TArray<FName>
+  GrantsAbility:    FName               // NAME_None if not granting an ability
 }
 ```
 
@@ -190,76 +190,65 @@ destructible.
 ### 16.1 World Object Behavior (embedded in Resource Definition)
 
 ```
-WorldObjectBehavior {
-  canBePickedUp:             bool
-  pickupUnitTypeConstraints: string[]   // empty = any unit type may pick up
-  pickupTagConstraints:      string[]   // picking unit must have all these tags
-  timer:                     WorldObjectTimer | null   // null = no timer behavior
-  autoPickup:                bool       // default false; if true, units that overlap this
-                                        // object will automatically collect it if pickup
-                                        // conditions are met
+FWorldObjectBehavior {
+  bCanBePickedUp:             bool
+  PickupUnitTypeConstraints:  TArray<FName>    // empty = any unit type may pick up
+  PickupTagConstraints:       FGameplayTagContainer  // picking unit must have all these tags
+  Timer:                      TOptional<FWorldObjectTimer>
+  bAutoPickup:                bool             // default false
 }
 ```
 
 #### WorldObjectTimer Struct
 
-Follows UE timer semantics — real-elapsed-time based, not tick-counted.
+Real-elapsed-time based, not tick-counted (consistent with UE timer semantics).
 
 ```
-WorldObjectTimer {
-  rate:       float          // seconds between firings; must be > 0
-  maxFirings: int | null     // null = fire indefinitely; 1 = fire once then stop;
-                             // N = fire N times then stop
-  onFire:     WorldObjectScript?   // script executed each time the timer fires
+FWorldObjectTimer {
+  Rate:            float                               // seconds between firings; must be > 0
+  MaxFirings:      int32                              // 0 = fire indefinitely; N = fire N times then stop
+  TimerScriptClass: TSubclassOf<UWorldObjectTimerScript>  // Blueprint behaviour; null = no behaviour
 }
 ```
 
-**Examples:**
+### 16.2 World Object Timer Script
+
+Timer behaviour is implemented as a **Blueprint subclass of `UWorldObjectTimerScript`**,
+not as an inline expression. Create a Blueprint subclass in the Content Browser and assign
+the class to `FWorldObjectTimer.TimerScriptClass`.
 
 ```
-// Meat that rots after 120 seconds (fires once, then world object transforms)
-timer: { rate: 120.0, maxFirings: 1, onFire: transform("rotten_meat", self.quantity) }
-
-// A relic that never expires (no timer)
-timer: null
-
-// A torch that flickers every 5 seconds indefinitely (visual/event effect only)
-timer: { rate: 5.0, maxFirings: null, onFire: fireEvent("torch_flicker") }
-
-// A poison cloud that damages nearby units every 2 seconds, 10 times, then dissipates
-timer: { rate: 2.0, maxFirings: 10, onFire: <damage script>; on final firing: consume() }
+// UCLASS(Abstract, Blueprintable) — UObject subclass.
+//
+// UFUNCTION(BlueprintNativeEvent)
+// void OnFire(AWorldObjectActor* Owner, int32 FiringIndex, int32 MaxFirings);
+//
+// FiringIndex is 1-based; equals MaxFirings on the final firing.
+// Use the Blueprint-callable helper functions below (declared on this base class)
+// to interact with the world. Do not mutate world state directly.
 ```
 
-The `on_world_object_expired` event hook fires on the **final** timer firing (when
-`maxFirings` is reached). For `maxFirings: null` (indefinite) timers, this hook never
-fires unless the world object is explicitly consumed by its script. The `elapsed` field
-on `WorldObjectActor` tracks total seconds since the object was spawned, independent of
-the timer.
+**Blueprint-callable helpers on `UWorldObjectTimerScript`:**
 
-### 16.2 World Object Script
+| Function | Effect |
+|---|---|
+| `TransformSelf(Owner, NewResourceDefId, Quantity)` | Replaces the world object with a new one of a different resource type |
+| `ConsumeSelf(Owner)` | Removes the world object silently |
+| `FireEvent(Owner, EventDefId)` | Fires a named `EventDefinition` |
+| `SpawnObject(Owner, ResourceDefId, Quantity, Tile)` | Spawns an additional world object at the specified tile |
 
-A Turing-complete scripted expression defined within a `WorldObjectTimer.onFire`. It
-executes each time the timer fires. The script may access world state and issue a limited
-set of actions.
+**Example patterns (as Blueprint subclass descriptions, not inline code):**
 
-```
-WorldObjectScript {
-  script: <expression>
-  // Script context:
-  //   self          — this WorldObjectActor
-  //   world         — read-only world state queries
-  //   firing        — current firing index (1-based); equals maxFirings on final firing
-  // Available actions:
-  //   transform(newResourceDefId, quantity)          — replace self with a new world object
-  //   consume()                                      — remove self from world silently
-  //   fireEvent(eventDefId)                          — fire a named event
-  //   spawnObject(resourceDefId, quantity, position) — create additional world objects
-}
-```
+- **Rotting meat** — `MaxFirings: 1`. Override `OnFire`: call `TransformSelf` with
+  `"rotten_meat"` and `Owner.Contents[0].Quantity` on the first (and only) firing.
+- **Torch flicker** — `MaxFirings: 0` (indefinite). Override `OnFire`: call `FireEvent`
+  with `"torch_flicker"` every firing. No termination.
+- **Poison cloud** — `MaxFirings: 10`. Override `OnFire`: deal damage via `GRANT_SKILL_XP`
+  or a custom helper each firing; call `ConsumeSelf` when `FiringIndex == MaxFirings`.
 
-Scripts may branch on `firing` to produce different behavior on the final execution. For
-example, a poison cloud may apply damage on each firing and call `consume()` only when
-`firing == maxFirings`.
+The `on_world_object_expired` event hook fires when the **final** firing completes (when
+`MaxFirings` is reached and `OnFire` returns). For `MaxFirings: 0` (indefinite) timers,
+this hook never fires unless `ConsumeSelf` is called explicitly.
 
 ### 16.3 World Object Actor (Runtime)
 
@@ -273,23 +262,27 @@ are both `WorldObjectActor` instances; the only difference is how many `Containe
 entries they have.
 
 ```
-WorldObjectActor {
-  // IInventoryHolder: contents (ContainerSlot[])
-  // IDamageable (optional): currentHealth
-  // IAttributeHolder (optional): attributes
+// AWorldObjectActor — UE AActor
+// Implements IInventoryHolder always. Implements IDamageable and IAttributeHolder only
+// when the resource definition declares a non-zero maxHealth.
 
-  id:              string
-  ownerId:         string | null
-  contents:        ContainerSlot[]     // all resource types held by this container
-  position:        { x: float, y: float }
-  timerElapsed:    float    // seconds since last firing (resets each firing)
-  firingCount:     int      // number of times the timer has fired so far
-  totalElapsed:    float    // total seconds since this world object was spawned
+FWorldObjectActorData {
+  Id:              FName
+  OwnerId:         TOptional<FName>
+  Contents:        TArray<FContainerSlot>    // unified container; always used regardless of slot count
+  Position:        FVector2D
+  TimerElapsed:    float     // seconds since last firing (resets each firing)
+  FiringCount:     int32     // number of times the timer has fired
+  TotalElapsed:    float     // total seconds since spawned
+
+  // Optional — only when designer declares non-zero maxHealth:
+  CurrentHealth:   float
+  Attributes:      TArray<FAttributeDeclaration>
 }
 
-ContainerSlot {
-  resourceDefId:  string
-  quantity:       int
+FContainerSlot {
+  ResourceDefId:  FName
+  Quantity:       int32
 }
 ```
 

@@ -15,11 +15,16 @@ entity's active modifier stack (see [Entities/Workers §13](ENTITIES_WORKERS.md)
 
 | Field | Type | Description |
 |---|---|---|
-| `id` | `string` | Unique identifier |
-| `name` | `string` | Display name |
-| `icon` | `asset ref` | Visual / map representation |
-| `footprint` | `bool[][]` | Binary occupancy grid; see §4.1.1 |
-| `tags` | `string[]` | Arbitrary classification labels |
+| `id` | `FName` | Unique identifier |
+| `name` | `FString` | Display name |
+| `icon` | `TSoftObjectPtr<UTexture2D>` | Visual / map representation |
+| `footprint` | `TArray<TArray<bool>>` | Binary occupancy grid; see §4.1.1 |
+| `createsElevatedSurface` | `bool` | `true` if this building contributes its footprint tiles to the elevated nav graph. Default `false`. See §4.1.2. |
+| `wallElevation` | `int32` | Height of the elevated walkable surface in height units above the tile's base `elevation`. Used for unit visual Z positioning and attack calculations. Only relevant when `createsElevatedSurface: true`. Default `0`. |
+| `archPassableCells` | `TArray<FIntPoint>` | Footprint cells `(row, col)` that are owned by this building but remain ground-passable (e.g. gatehouse arch tiles). Sets `TileInstance.archPassable = true` on placement. Default empty. See §4.1.2. |
+| `elevatedTransitionCells` | `TArray<FIntPoint>` | Footprint cells that act as ground↔elevated nav transitions (stairs, ramps). Each entry registers an `FNavTransition` at placement. Default empty. See §4.1.2. |
+| `adjacencyBonuses` | `TArray<FAdjacencyBonus>` | Passive modifiers this building receives when qualifying buildings are placed nearby. See §23. Default empty. |
+| `tags` | `TArray<FName>` | Arbitrary classification labels |
 
 #### 4.1.1 Footprint Grid
 
@@ -51,6 +56,63 @@ building. The building's logical origin tile is always `footprint[0][0]`'s world
 Rotation (0°, 90°, 180°, 270°) transforms the grid at placement time. The rotated grid
 is computed from the Definition grid and stored on the Building Actor instance.
 
+#### 4.1.2 Elevated Surface Properties
+
+Buildings that form wall tops, towers, or gatehouses declare elevated surface properties
+via the fields in §4.1. These work together as follows:
+
+**`createsElevatedSurface`** — when `true`, all `footprint[row][col] == true` cells are
+registered into the elevated nav graph (`FElevatedNavGraph`) on placement. The tiles join
+an existing adjacent elevated component or form a new one. On demolition, tiles are removed
+and affected components are flood-filled for connectivity.
+
+**`wallElevation`** — the height of the elevated walkable surface, in the same height units
+as `TileInstance.elevation`. A unit standing on an elevated tile computes its visual Z as:
+```
+visualZ = (tile.elevation + buildingDef.wallElevation) * World.heightScalar
+```
+This value is also used by the combat system for elevation-advantage calculations.
+
+**`archPassableCells`** — a list of footprint cells `(row, col)` that the building owns
+(sets `TileInstance.occupantId`) but does not block at ground level. On placement the
+system sets `TileInstance.archPassable = true` for each listed cell; on demolition it is
+cleared. These cells are included in `createsElevatedSurface` tile registration if that
+flag is also true.
+
+Example — a 3×3 gatehouse where the central column is the arch passage:
+```
+footprint:           archPassableCells:   createsElevatedSurface: true
+[ T  T  T ]         [ (0,1), (1,1),      wallElevation: 4
+[ T  T  T ]           (2,1) ]
+[ T  T  T ]
+```
+Ground units path through the three center tiles freely. Wall units path across all nine
+tiles at elevation. Stair buildings placed adjacent to the gatehouse register
+`elevatedTransitionCells` to connect the wall-top to ground.
+
+**`elevatedTransitionCells`** — footprint cells that serve as ground↔elevated crossing
+points (stairs, ramps, ladders). Each listed cell `(row, col)` registers an
+`FNavTransition` linking the ground-layer tile to the elevated tile at `wallElevation`.
+The transition cost is a designer-set value on the building definition.
+
+```
+FTransitionCellEntry {
+  FootprintCell:  FIntPoint    // (row, col) within the footprint
+  TransitionCost: float        // cost added when a unit changes nav layers here
+}
+```
+
+`elevatedTransitionCells` is the sole mechanism by which units change between the ground
+graph and an elevated component. A wall chain with no reachable transition tile is
+inaccessible to ground units.
+
+**Stair height rules** — which stair types can bridge which height differences is enforced
+at placement time via placement rules (§4.4). A stair building definition declares its
+`maxBridgeableElevation` attribute; placement is rejected if the elevation difference
+between the adjacent ground tile and the target wall's `wallElevation` exceeds this value.
+This prevents a single-step stair from connecting to a tall tower without intermediate
+stair sections.
+
 ### 4.2 Attributes
 
 Buildings declare their base attribute values here. Core attributes present on all entities
@@ -58,9 +120,9 @@ are defined in [Entities/Workers §13.1](ENTITIES_WORKERS.md). Additional design
 custom attributes may be declared here.
 
 ```
-AttributeDeclaration {
-  attributeId:  string    // "maxHealth", "armour", or a custom attribute id
-  baseValue:    float
+FAttributeDeclaration {
+  AttributeId:  FName     // "maxHealth", "armour", or a custom attribute id
+  BaseValue:    float
 }
 ```
 
@@ -116,44 +178,52 @@ operation. Constructor units (`canConstruct: true`) are released when `BUILDING_
 
 ### 4.4 Placement Rules
 
+Placement validation logic is implemented as **Blueprint subclasses of `UPlacementRule`**,
+not as string expressions. Building Definitions carry an array of class references; the
+engine instantiates each class and calls `EvaluateTile` per occupied footprint cell.
+
 ```
-PlacementRule {
-  script: <expression>
-  // Script context:
-  //   cells           — array of occupied TileInstances (footprint true-cells only)
-  //   cell.elevation  — elevation of this cell
-  //   cell.neighbors  — array of 4 or 8 adjacent TileInstances
-  //   building        — the Building Definition being placed
-  //   zone            — the Zone Instance for this cell, if any
-  // Must return: bool
-}
+// BuildingDefinition field:
+PlacementRules:  TArray<TSubclassOf<UPlacementRule>>
+
+// UCLASS(Abstract, Blueprintable) — UObject subclass.
+// Create a Blueprint subclass in the Content Browser; add the class to
+// BuildingDefinition.PlacementRules.
+//
+// UFUNCTION(BlueprintNativeEvent)
+// bool EvaluateTile(
+//     const FTileInstance&      Tile,         // the occupied footprint cell being checked
+//     const TArray<FTileInstance>& Neighbors, // 4 or 8 adjacent tiles
+//     const TArray<FTileInstance>& AllCells,  // all occupied footprint cells (for aggregate checks)
+//     UBuildingDefinition*      BuildingDef,
+//     const FZoneInstance*      Zone          // null if unclaimed
+// ) const;
 ```
 
-The script is evaluated once per occupied footprint cell. Placement is rejected if the
-script returns `false` for any cell. The script may also aggregate across all cells
-(e.g. "max elevation delta across all occupied cells must be <= 1") by iterating the
-`cells` array.
+`EvaluateTile` is called once per occupied footprint cell. Placement is rejected if **any**
+call returns `false`. Multiple rules compose as AND. `AllCells` is provided so a single
+rule can implement aggregate constraints (e.g. "max elevation delta across all occupied
+cells ≤ 1") without iterating tiles outside the Blueprint.
 
-**Placement is additionally blocked by the following hard gates, independent of the script:**
+**Hard gates enforced before any `UPlacementRule` is called:**
 
 | Gate | Condition |
 |---|---|
-| Tile occupied | Any `true` footprint cell maps to a tile where `occupantId != null` |
+| Tile occupied | Any `true` footprint cell has `occupantId != null` |
 | Zone ownership | Any occupied cell's `zoneId` belongs to a zone not owned by the placing player |
-| Building prohibited | Any occupied cell's `allowedForBuilding == false` *and* the placement rule script does not explicitly return `true` for that cell |
+| Building prohibited | Any occupied cell has `allowedForBuilding == false` |
 
-The placement rule script may override the `allowedForBuilding` gate — a building designed
-to be placed on water, for example, can include `tile.allowedForBuilding == false` and still
-pass by returning `true` from its script. The tile-occupied and zone-ownership gates are
-always enforced and cannot be overridden by script.
+A `UPlacementRule` override cannot bypass the tile-occupied or zone-ownership gates. It
+**can** override `allowedForBuilding` — a building intended for water placement creates a
+rule that returns `true` for tiles with `allowedForBuilding == false`.
 
 ### 4.5 Access Points
 
 ```
-AccessPoint {
-  id:      string
-  offset:  { x: int, y: int }
-  tags:    string[]     // labels used to filter which units may use this access point
+FAccessPoint {
+  Id:      FName
+  Offset:  FIntPoint              // tile offset from building origin
+  Tags:    FGameplayTagContainer  // labels used to filter which units may use this access point
 }
 ```
 
@@ -178,10 +248,10 @@ eligible (nearest reachable is selected).
 ### 4.6 Inventory Declarations
 
 ```
-InventorySlotDeclaration {
-  resourceDefId:  string
-  capacity:       int
-  namespace:      "local" | "available"
+FInventorySlotDeclaration {
+  ResourceDefId:  FName
+  Capacity:       int32
+  Namespace:      "local" | "available"    // UENUM
 }
 ```
 
@@ -193,11 +263,11 @@ InventorySlotDeclaration {
 ### 4.7 Unit Roster
 
 ```
-UnitRosterEntry {
-  unitTypeId:  string
-  minCount:    int     // building enters "blocked" if this is not met
-  maxCount:    int     // maximum simultaneously assigned units of this type
-  derived:     bool    // true if sourced from a task step requirement
+FUnitRosterEntry {
+  UnitTypeId:  FName
+  MinCount:    int32    // building enters "blocked" if not met
+  MaxCount:    int32    // maximum simultaneously assigned units of this type
+  bDerived:    bool     // true if sourced from a task step requirement
 }
 ```
 
@@ -207,10 +277,10 @@ Buildings declare named equipment slots. Equippable resources are placed into th
 via task steps or event actions, applying their modifiers to the building.
 
 ```
-EquipmentSlotDeclaration {
-  slotId:              string    // unique within this building e.g. "millstone", "furnace"
-  slotType:            string    // type string matched against resource fitsSlotTypes
-  label:               string    // display name shown in UI
+FEquipmentSlotDeclaration {
+  SlotId:    FName          // unique within this building e.g. "millstone", "furnace"
+  SlotType:  FGameplayTag   // matched against resource fitsSlotTypes
+  Label:     FString        // display name shown in UI
 }
 ```
 
@@ -226,38 +296,49 @@ may place equipment into building slots. See [Resources §14](RESOURCES.md).
 ### 5.1 Work Task Definition
 
 ```
-WorkTaskDefinition {
-  id:           string
-  name:         string
-  trigger:      "loop" | "event"
-  eventRef:     GameEventRef?
-  concurrency:  TaskConcurrencyRules
-  steps:        WorkStepDefinition[]
-  enabled:      bool
+FWorkTaskDefinition {
+  Id:           FName
+  Name:         FString
+  Trigger:      "loop" | "event"    // UENUM
+  EventRef:     FName               // GameEventRef; NAME_None if trigger = "loop"
+  Concurrency:  FTaskConcurrencyRules
+  Steps:        TArray<FWorkStepDefinition>
+  bEnabled:     bool
 }
 ```
 
 ### 5.2 Concurrency Rules
 
 ```
-TaskConcurrencyRules {
-  selfConcurrency:  "none" | "unlimited" | int
-  crossTaskMode:    "exclusive" | "open" | "script"
-  crossTaskScript:  string?     // script expression evaluated when crossTaskMode = "script"
-                                // receives: thisTask, candidateTask → returns bool (can coexist)
-  crossTaskRefs:    string[]    // reserved for future use; ignored when crossTaskMode = "script"
+FTaskConcurrencyRules {
+  SelfConcurrency:         "none" | "unlimited" | int32    // UENUM + optional count
+  CrossTaskMode:           "exclusive" | "open" | "custom"  // UENUM
+  CompatibilityRuleClass:  TSubclassOf<UTaskCompatibilityRule>
+                           // Required when CrossTaskMode = "custom"; ignored otherwise.
 }
 ```
 
-**`crossTaskMode` values:**
+**`CrossTaskMode` values:**
 - `"exclusive"` — this task cannot run alongside any other task on the same building.
   Construction tasks use this.
 - `"open"` — no restriction; this task may run alongside any other task.
-- `"script"` — a script expression determines compatibility. The script receives the running
-  task and a candidate task as context and returns `true` (can coexist) or `false` (blocked).
-  This replaces the former `"whitelist"` / `"blacklist"` enum values with a more expressive
-  option: whitelist logic is `candidateTask.id in ["taskA", "taskB"]`, blacklist logic is
-  `candidateTask.id not in ["taskC"]`.
+- `"custom"` — compatibility is determined by a `UTaskCompatibilityRule` Blueprint subclass.
+
+```
+// UCLASS(Abstract, Blueprintable) — UObject subclass.
+// Create a Blueprint subclass; assign the class to FTaskConcurrencyRules.CompatibilityRuleClass.
+//
+// UFUNCTION(BlueprintNativeEvent)
+// bool CanCoexist(
+//     const FTaskInstanceControl& ThisTask,
+//     const FTaskInstanceControl& CandidateTask
+// ) const;
+//
+// Return true if the two tasks may run concurrently. Whitelist pattern:
+//   return CandidateTask.TaskDefId == "task_a" || CandidateTask.TaskDefId == "task_b"
+// Blacklist pattern:
+//   return CandidateTask.TaskDefId != "task_c"
+```
 
 **Conflict resolution:**
 1. Check this task's `crossTaskMode` against the candidate task.
@@ -272,30 +353,34 @@ TaskConcurrencyRules {
 ### 5.3 Work Step Definition
 
 ```
-WorkStepDefinition {
-  id:                string
-  type:              WorkStepType
-  duration:          float               // seconds; 0 = instantaneous
-  workerRequirements: WorkerRequirement[] // all must be simultaneously present to begin step
-  preconditions:     StepPrecondition[]
-  vars:              StepVars
+FWorkStepDefinition {
+  Id:                FName
+  Type:              EWorkStepType               // UENUM
+  Duration:          float                       // seconds; 0 = instantaneous
+  WorkerRequirements: TArray<FWorkerRequirement> // all must be simultaneously present
+  Preconditions:     TArray<FStepPrecondition>
+  Vars:              FStepVars
+  SkillGrants:       TArray<FSkillGrant>         // XP awarded to executing unit on step completion
 }
 
-WorkerRequirement {
-  unitTypeId:       string       // unit type that must be present
-  count:            int          // number of units of this type required (≥ 1)
-  tagRequirements:  string[]     // each present unit of this type must have ALL these tags
-                                 // (checks definition tags + modifier-granted tags)
-  accessPointTags:  string[]     // unit must path to an access point bearing ALL these tags;
-                                 // empty = any access point (see §4.5)
-  role:             "required" | "bonus"
-  bonusEffect:      BonusWorkerEffect?   // only meaningful when role = "bonus"
+FSkillGrant {
+  SkillId:   FName    // references a FSkillDefinition (see Entities/Workers §21)
+  XPAmount:  float    // added to the executing unit's XPAttributeId on completion
 }
 
-BonusWorkerEffect {
-  attributeId:  string    // attribute on the building or step to scale
-  scalePerUnit: float     // additive multiplier increment per bonus worker
-                          // e.g. scalePerUnit: 0.2 → each bonus unit adds 20% speed
+FWorkerRequirement {
+  UnitTypeId:       FName
+  Count:            int32           // number of units of this type required (≥ 1)
+  TagRequirements:  FGameplayTagContainer  // present units must have ALL these tags
+  AccessPointTags:  FGameplayTagContainer  // unit must path to access point bearing ALL these tags;
+                                           // empty = any access point (see §4.5)
+  Role:             "required" | "bonus"    // UENUM
+  BonusEffect:      TOptional<FBonusWorkerEffect>
+}
+
+FBonusWorkerEffect {
+  AttributeId:  FName     // attribute on the building or step to scale
+  ScalePerUnit: float     // additive multiplier per bonus worker (e.g. 0.2 = +20% per unit)
 }
 ```
 
@@ -325,16 +410,19 @@ reach the building (see §4.5).
 ### 5.4 Step Preconditions
 
 ```
-StepPrecondition {
-  type:             "inventory_min" | "inventory_max" | "building_state" |
-                    "zone_owned" | "event_flag" | "entity_has_tag"
-  resourceDefId:    string?
-  namespace:        "local" | "available"?
-  quantity:         int?
-  targetBuildingId: string?
-  requiredState:    string?
-  flagId:           string?
-  tag:              string?     // for entity_has_tag type
+FStepPrecondition {
+  Type:             "inventory_min" | "inventory_max" | "building_state" |
+                    "zone_owned" | "event_flag" | "entity_has_tag" | "resource_has_tag" |
+                    "skill_min_level"    // UENUM
+  ResourceDefId:    FName        // NAME_None if unused
+  Namespace:        "local" | "available"    // UENUM
+  Quantity:         int32
+  TargetBuildingId: FName        // NAME_None if unused
+  RequiredState:    FName        // NAME_None if unused
+  FlagId:           FName        // NAME_None if unused
+  Tag:              FName        // for entity_has_tag / resource_has_tag types
+  SkillId:          FName        // for skill_min_level type; NAME_None otherwise
+  MinLevel:         int32        // for skill_min_level type
 }
 ```
 
@@ -346,14 +434,15 @@ StepPrecondition {
 | `zone_owned` | This building's zone is owned by the expected player |
 | `event_flag` | Named world flag is `true` |
 | `entity_has_tag` | This building or the executing unit has the specified tag |
+| `skill_min_level` | The executing unit's `LevelAttributeId` for `SkillId` ≥ `MinLevel` |
 
 ### 5.5 Work Step Types
 
 | Type | Description | Key `vars` |
 |---|---|---|
-| `GENERATE_RESOURCE` | Creates resource into an inventory slot | `resourceDefId`, `quantity`, `destinationNamespace` |
+| `GENERATE_RESOURCE` | Creates resource into an inventory slot | `resourceDefId`, `quantity`, `destinationNamespace`, `outputScaling` (optional) |
 | `CONSUME_RESOURCE` | Removes resource from an inventory slot | `resourceDefId`, `quantity`, `sourceNamespace` |
-| `TRANSFORM_RESOURCE` | Atomically consumes inputs, produces outputs. See §5.5.1. | `inputs[]`, `outputs[]` |
+| `TRANSFORM_RESOURCE` | Atomically consumes inputs, produces outputs. See §5.5.1. | `inputs[]`, `outputs[]`, `outputScaling` (optional, applied to all outputs) |
 | `COLLECT_RESOURCE` | Sends unit to retrieve from external available inventory. See §5.5.2. | `sourceBuildingId`, `resourceDefId`, `quantity`, `destinationNamespace` |
 | `DELIVER_RESOURCE` | Sends unit to deposit to external available inventory | `resourceDefId`, `quantity`, `sourceNamespace`, `destinationBuildingId` |
 | `EQUIP_ITEM` | Places a resource from inventory into an equipment slot | `resourceDefId`, `slotId`, `targetEntityId \| "self"` |
@@ -368,16 +457,36 @@ StepPrecondition {
 `inputs[]` and `outputs[]` each contain an array of `TransformEntry`:
 
 ```
-TransformEntry {
-  resourceDefId:  string
-  quantity:       int
-  namespace:      "local" | "available"
+FTransformEntry {
+  ResourceDefId:  FName
+  Quantity:       int32
+  Namespace:      "local" | "available"    // UENUM
 }
 ```
 
 The step atomically consumes all `inputs` and produces all `outputs` if and only if all
 input quantities are available. If any input is insufficient, the step blocks in
 `"waiting_on_precondition"` and is retried next tick.
+
+#### 5.5.2a OutputScaling (GENERATE_RESOURCE and TRANSFORM_RESOURCE)
+
+Both step types accept an optional `OutputScaling` field that multiplies the output
+`quantity` by a factor derived from the executing unit's skill level:
+
+```
+FSkillScaling {
+  SkillId:        FName    // references a FSkillDefinition (Entities/Workers §21)
+  BaseMultiplier: float    // multiplier at level 0 (e.g. 1.0)
+  PerLevelBonus:  float    // added per level (e.g. 0.1 = +10% per level)
+}
+// effectiveMultiplier = BaseMultiplier + (currentLevel × PerLevelBonus)
+// final quantity       = floor(declaredQuantity × effectiveMultiplier)
+```
+
+When `OutputScaling` is set on `TRANSFORM_RESOURCE`, the multiplier is applied to every
+entry in `outputs[]` independently. `inputs[]` quantities are not scaled — only output.
+If the executing unit has no declared skill matching `SkillId`, `currentLevel` defaults to
+0 (base multiplier only).
 
 #### 5.5.2 COLLECT_RESOURCE with null sourceBuildingId
 
@@ -396,11 +505,12 @@ are preferred among equidistant candidates.
 #### 5.5.3 SPAWN_UNIT vars
 
 ```
-SpawnUnitVars {
-  unitTypeDefId:  string           // unit type to spawn
-  spawnPosition:  "access_point"   // spawn at the building's primary (first declared) access point
-              | "nearest_passable" // spawn at the nearest passable tile adjacent to the footprint
-  inheritOwnerId: bool             // if true, spawned unit inherits building's ownerId
+FSpawnUnitVars {
+  UnitTypeDefId:  FName              // unit type to spawn
+  SpawnPosition:  "access_point"     // spawn at the building's primary access point
+                | "nearest_passable" // spawn at the nearest passable tile adjacent to the footprint
+                                     // UENUM
+  bInheritOwnerId: bool              // if true, spawned unit inherits building's ownerId
 }
 ```
 
@@ -437,24 +547,19 @@ WorkTaskDefinition {
 ### 5.6 Simulation-Level Task Controls
 
 ```
-TaskInstanceControl {
-  taskDefId:       string
-  enabled:         bool
-  priority:        "high" | "medium" | "low"
-  executionMode:   "forever" | "once" | "count"
-  executionCount:  int?      // required when executionMode = "count"; decrements each cycle
-  completeBehavior: "terminal" | "reset"
-                    // "terminal": when executionCount reaches 0, state = "complete" permanently;
-                    //             task cannot run again unless an event action resets executionCount
-                    //             and sets state back to "idle"
-                    // "reset":    when executionCount reaches 0, task loops from step 0 again;
-                    //             designers use this for repeating-but-limited patterns
-  state:           "idle" | "running" | "blocked_concurrency" |
-                   "waiting_on_precondition" | "waiting_on_unit" | "complete"
-  progress: {
-    currentStepIndex:  int
-    stepElapsed:       float
-  }
+FTaskInstanceControl {
+  TaskDefId:        FName
+  bEnabled:         bool
+  Priority:         "high" | "medium" | "low"    // UENUM
+  ExecutionMode:    "forever" | "once" | "count"  // UENUM
+  ExecutionCount:   int32     // required when ExecutionMode = "count"; decrements each cycle
+  CompleteBehavior: "terminal" | "reset"    // UENUM
+                    // "terminal": when ExecutionCount reaches 0, State = "complete" permanently
+                    // "reset":    when ExecutionCount reaches 0, task loops from step 0 again
+  State:            "idle" | "running" | "blocked_concurrency" |
+                    "waiting_on_precondition" | "waiting_on_unit" | "complete"    // UENUM
+  CurrentStepIndex: int32
+  StepElapsed:      float
 }
 ```
 
@@ -472,47 +577,55 @@ task if the game design requires it.
 interfaces are not repeated inline below.
 
 ```
-BuildingActor {
-  // IDamageable:     currentHealth
-  // IAttributeHolder: attributes
-  // IModifiable:     modifierStack
-  // IEquippable:     equipmentSlots
-  // IInventoryHolder: localInventory, availableInventory, abstractInventory
+// ABuildingActor — UE AActor
+// Implements IDamageable, IAttributeHolder, IModifiable, IEquippable, IInventoryHolder
 
-  id:                   string
-  defId:                string
-  ownerId:              string
-  originTile:           { x: int, y: int }          // top-left of bounding box in world tiles
-  rotation:             0 | 90 | 180 | 270
-  rotatedFootprint:     bool[][]                     // Definition footprint transformed by rotation
-  state:                "constructing" | "idle" | "working" | "blocked" | "disabled"
-                        // "disabled": building is fully non-functional — no tasks run,
-                        //   no new unit assignments are processed, existing assignments
-                        //   are paused. Triggered and cleared by DISABLE_BUILDING /
-                        //   ENABLE_BUILDING event actions respectively.
-  constructionControl:  TaskInstanceControl | null
-  localInventory:       InventorySlot[]
-  availableInventory:   InventorySlot[]
-  abstractInventory:    AbstractInventorySlot[]
-  taskControls:         TaskInstanceControl[]
-  assignedUnits:        AssignedUnit[]
+FBuildingRuntimeData {
+  // IDamageable:
+  CurrentHealth:        float
+
+  // IAttributeHolder:
+  Attributes:           TArray<FAttributeDeclaration>
+
+  // IModifiable:
+  ModifierStack:        TArray<FModifier>
+
+  // IEquippable:
+  EquipmentSlots:       TArray<FEquipmentSlotInstance>
+
+  // Runtime fields:
+  Id:                   FName
+  DefId:                FName
+  OwnerId:              FName
+  OriginTile:           FIntPoint             // top-left of bounding box in world tiles
+  Rotation:             int32                 // 0, 90, 180, or 270
+  RotatedFootprint:     TArray<TArray<bool>>  // Definition footprint transformed by rotation
+  State:                "constructing" | "idle" | "working" | "blocked" | "disabled"    // UENUM
+                        // "disabled": fully non-functional — no tasks run, no new assignments.
+                        //   Set/cleared by DISABLE_BUILDING / ENABLE_BUILDING event actions.
+  ConstructionControl:  TOptional<FTaskInstanceControl>
+  LocalInventory:       TArray<FInventorySlot>
+  AvailableInventory:   TArray<FInventorySlot>
+  AbstractInventory:    TArray<FAbstractInventorySlot>
+  TaskControls:         TArray<FTaskInstanceControl>
+  AssignedUnits:        TArray<FAssignedUnit>
 }
 
-InventorySlot {
-  resourceDefId:  string
-  quantity:       int
-  capacity:       int    // from InventorySlotDeclaration; not modified by attribute stack
+FInventorySlot {
+  ResourceDefId:  FName
+  Quantity:       int32
+  Capacity:       int32    // from FInventorySlotDeclaration; not a modifier target
 }
 
-AbstractInventorySlot {
-  resourceDefId:  string
-  quantity:       float
-  capacity:       float
+FAbstractInventorySlot {
+  ResourceDefId:  FName
+  Quantity:       float
+  Capacity:       float    // -1.0f = uncapped
 }
 
-AssignedUnit {
-  unitTypeId:   string
-  unitActorId:  string
+FAssignedUnit {
+  UnitTypeId:   FName
+  UnitActorId:  FName
 }
 ```
 
@@ -549,25 +662,27 @@ are handled by replacing or upgrading the slot declaration via equipment (see [R
 | `on_unit_spawned` | Unit created by a `SPAWN_UNIT` step | `unitActorId`, `unitTypeDefId`, `buildingActorId`, `position` |
 | `on_faction_stance_changed` | Faction relationship stance updated | `factionId`, `targetFactionId`, `newStance` |
 | `on_flag_set` | Named event flag set to `true` | `flagId` |
+| `on_skill_level_up` | Unit's skill level increases | `unitActorId`, `ownerId`, `skillId`, `newLevel` |
 
 ### 10.2 Event Definition
 
 ```
-EventDefinition {
-  id:       string
-  name:     string
-  hook:     HookId
-  filter:   EventFilter?
-  actions:  EventAction[]
+FEventDefinition {
+  Id:       FName
+  Name:     FString
+  Hook:     FName    // HookId — one of the hook names in §10.1
+  Filter:   TOptional<FEventFilter>
+  Actions:  TArray<FEventAction>
 }
 
-EventFilter {
-  buildingDefId:  string?
-  unitTypeDefId:  string?
-  zoneId:         string?
-  ownerId:        string?
-  radius:         float?
-  // all specified filters are ANDed
+FEventFilter {
+  BuildingDefId:  FName     // NAME_None = any
+  UnitTypeDefId:  FName
+  ZoneId:         FName
+  OwnerId:        FName
+  Radius:         float     // 0.0f = no radius filter
+  ResourceTag:    FGameplayTag  // filter by resource tag; empty tag = any
+  // all non-empty/non-zero fields are ANDed
 }
 ```
 
@@ -591,6 +706,7 @@ EventFilter {
 | `REVOKE_ABILITY` | Removes a granted ability; passive effects deactivate immediately | `abilityDefId`, `targetEntityId` |
 | `SET_FACTION_STANCE` | Changes the relationship stance between two factions | `factionId`, `targetFactionId`, `stance: "friendly" \| "neutral" \| "hostile"` |
 | `APPLY_TECH` | Applies a technology | `techDefId`, `ownerId` |
+| `GRANT_SKILL_XP` | Awards skill XP directly to a unit actor | `skillId`, `xpAmount: float`, `target: entityId \| "attacker"` — `"attacker"` resolves to the payload's `attackerId` field; only valid in hooks that carry an attacker (e.g. `on_unit_death`, `on_unit_damaged`, `on_building_damaged`) |
 | `EMIT_LOG` | Writes to simulation log | `message: string` |
 
 **Event loop note:** `FIRE_EVENT` can trigger another `FIRE_EVENT`, creating a chain. There
@@ -629,15 +745,15 @@ attached to the building definition or zone. This tells the system what constitu
 crossing event.
 
 ```
-ResourceThreshold {
-  id:            string
-  resourceDefId: string
-  namespace:     "local" | "available" | "scoped_inventory"
-  threshold:     float           // the quantity value to watch
-  direction:     "rising"        // fires when quantity crosses threshold upward
+FResourceThreshold {
+  Id:            FName
+  ResourceDefId: FName
+  Namespace:     "local" | "available" | "scoped_inventory"    // UENUM
+  Threshold:     float           // the quantity value to watch
+  Direction:     "rising"        // fires when quantity crosses threshold upward
                | "falling"       // fires when quantity crosses threshold downward
-               | "either"        // fires on any crossing in either direction
-  eventRef:      GameEventRef    // event to fire when threshold is crossed
+               | "either"        // UENUM
+  EventRef:      FName           // GameEventRef — id of EventDefinition to fire
 }
 ```
 
@@ -655,15 +771,15 @@ that stays above or below without crossing does not re-fire.
 ## 11. Connections
 
 ```
-Connection {
-  id:                   string
-  sourceBuildingId:     string
-  sourceResourceDefId:  string
-  destBuildingId:       string
-  destResourceDefId:    string
-  priority:             int
-  transferMode:         "unit_driven" | "automatic"
-  rateLimit:            float?
+FConnection {
+  Id:                   FName
+  SourceBuildingId:     FName
+  SourceResourceDefId:  FName
+  DestBuildingId:       FName
+  DestResourceDefId:    FName
+  Priority:             int32
+  TransferMode:         "unit_driven" | "automatic"    // UENUM
+  RateLimit:            float    // 0.0f = no limit (for automatic mode)
 }
 ```
 
@@ -681,26 +797,22 @@ future instances of a target definition type, or trigger resource creation / eve
 ### 15.1 Tech Definition
 
 ```
-TechDefinition {
-  id:             string
-  name:           string
-  description:    string
-  prerequisites:  string[]            // techDefIds that must be in World.activeTechs (for
-                                      // the same ownerId) before this tech may be applied.
-                                      // Empty = no prerequisites (freely applicable).
-  scope:          "global" | "zone" | "team" | "faction"
-  zoneId:         string?             // required if scope = "zone"
-  // "global"  — affects all instances of targetDefId owned by ownerId, worldwide
+FTechDefinition {
+  Id:             FName
+  Name:           FString
+  Description:    FString
+  Prerequisites:  TArray<FName>       // techDefIds that must be active before this may be applied
+  Scope:          "global" | "zone" | "team" | "faction"    // UENUM
+  ZoneId:         FName               // required if Scope = "zone"; NAME_None otherwise
+  // "global"  — affects all instances of TargetDefId owned by OwnerId, worldwide
   // "zone"    — affects only instances within the specified zone
-  // "team"    — affects all players sharing the same faction as ownerId
-  // "faction" — synonym for "team"; affects all units/buildings of the ownerId's faction
-  targetType:     "unit_type" | "building_type"
-  targetTags:     string[]            // if non-empty, tech affects only entities of
-                                      // targetType that have ALL listed tags
-  targetDefId:    string?             // specific definition id to target; null = any
-                                      // entity of targetType (filtered by targetTags)
-  cost:           ResourceCost[]      // { resourceDefId, quantity }[] to apply this tech
-  effects:        TechEffect[]
+  // "team"    — affects all players sharing the same faction as OwnerId
+  // "faction" — synonym for "team"; affects all units/buildings of the OwnerId's faction
+  TargetType:     "unit_type" | "building_type"    // UENUM
+  TargetTags:     FGameplayTagContainer  // if non-empty, tech affects only entities with ALL these tags
+  TargetDefId:    FName               // NAME_None = any entity of TargetType (filtered by TargetTags)
+  Cost:           TArray<FResourceCost>
+  Effects:        TArray<FTechEffect>
 }
 ```
 
@@ -719,19 +831,18 @@ one-way progression within a session.
 ### 15.2 Tech Effects
 
 ```
-TechEffect {
-  type:              "apply_modifier" | "create_resource" | "fire_event"
-  applicationRule:   "indefinite" | "once"
-  //   indefinite:  for apply_modifier — modifier is applied to all current instances and
-  //                to every future instance of targetDefId spawned while this tech is active
-  //   once:        effect fires once at application time for current instances only;
-  //                future instances do not receive it; used for create_resource and
-  //                one-shot fire_event effects
-  modifierTemplate:  ModifierTemplate?   // for apply_modifier
-  resourceDefId:     string?             // for create_resource
-  quantity:          int?
-  spawnPosition:     "player_keep" | TileCoord?
-  eventDefId:        string?             // for fire_event
+FTechEffect {
+  Type:              "apply_modifier" | "create_resource" | "fire_event"    // UENUM
+  ApplicationRule:   "indefinite" | "once"    // UENUM
+  //   indefinite:  for apply_modifier — modifier applied to all current instances and
+  //                every future instance of TargetDefId spawned while tech is active
+  //   once:        effect fires once at application time; future instances unaffected
+  ModifierTemplate:  TOptional<FModifierTemplate>    // for apply_modifier
+  ResourceDefId:     FName               // for create_resource; NAME_None if unused
+  Quantity:          int32
+  SpawnPosition:     FName               // "player_keep" or NAME_None for TileCoord
+  SpawnTileCoord:    TOptional<FIntPoint>
+  EventDefId:        FName               // for fire_event; NAME_None if unused
 }
 ```
 
@@ -755,11 +866,82 @@ fires it every time a new instance of `targetDefId` is created.
 ### 15.3 Active Tech Instance (World State)
 
 ```
-ActiveTech {
-  techDefId:   string
-  ownerId:     string
-  appliedAt:   float     // world clock time
-  appliedModifierIds: string[]   // modifier ids applied to existing instances
+FActiveTech {
+  TechDefId:           FName
+  OwnerId:             FName
+  AppliedAt:           float
+  AppliedModifierIds:  TArray<FName>    // modifier ids applied to existing instances
+}
+```
+
+---
+
+## 23. Building Adjacency Bonuses
+
+Buildings receive passive modifiers when certain other buildings are placed nearby.
+Adjacency bonuses are first-class — the engine evaluates and maintains them automatically
+on every placement and demolition event.
+
+### 23.1 Adjacency Bonus Declaration
+
+```
+FAdjacencyBonus {
+  Id:                 FName              // unique within this building definition
+  TriggerBuildingTag: FName              // any building bearing this tag within radius triggers the bonus
+  RadiusTiles:        int32              // Chebyshev distance from nearest occupied footprint cell
+  MaxTriggers:        int32              // max qualifying neighbours contributing; -1 = unlimited
+  ModifierTemplate:   FModifierTemplate  // one copy applied to self per qualifying neighbour
+}
+```
+
+Each qualifying neighbour within radius contributes one copy of `ModifierTemplate` to the
+declaring building, up to `MaxTriggers`. Modifier IDs are synthesised as
+`"adj_" + adjacencyBonusId + "_" + triggerBuildingActorId` — unique per contributing
+building, so each can be individually removed on demolition.
+
+### 23.2 Evaluation Triggers
+
+| Event | What the engine does |
+|---|---|
+| This building placed | Scan all buildings within each `AdjacencyBonus.RadiusTiles`; apply one modifier per qualifying neighbour found |
+| Any other building placed | Check if the new building triggers any adjacency bonuses on nearby existing buildings; apply modifiers to those buildings. Also check if nearby existing buildings trigger this building's own adjacency bonuses |
+| Any building demolished | Remove all bonus modifiers sourced from the demolished building's actor ID; re-evaluate any adjacency bonuses that may have been capped by `MaxTriggers` |
+
+### 23.3 Constraints
+
+- A building's adjacency bonuses cannot trigger on itself (self is excluded from the radius scan).
+- `TriggerBuildingTag` matches Definition-level `tags` only — modifier-granted tags on
+  buildings are not evaluated for adjacency triggering.
+- Radius is **Chebyshev distance** from the nearest `true` footprint cell of each building,
+  not from the origin tile.
+- Adjacency modifiers are ordinary stack entries (§13.3). They appear in
+  `getModifiersForAttribute` queries and are inspectable via `hasModifierFromSource`.
+
+### 23.4 Examples
+
+**Mill cluster** — a granary gains storage capacity for each nearby windmill (up to 3):
+
+```
+FAdjacencyBonus {
+  id:                 "mill_proximity"
+  triggerBuildingTag: "windmill"
+  radiusTiles:        5
+  maxTriggers:        3
+  modifierTemplate: { attributeTarget: "storageCapacity", operation: "additive",
+                      value: 500.0, duration: -1.0 }
+}
+```
+
+**Barracks network** — each nearby barracks speeds up training (unlimited stacking):
+
+```
+FAdjacencyBonus {
+  id:                 "barracks_network"
+  triggerBuildingTag: "barracks"
+  radiusTiles:        8
+  maxTriggers:        -1
+  modifierTemplate: { attributeTarget: "trainingSpeed", operation: "multiplicative",
+                      value: 0.05, duration: -1.0 }
 }
 ```
 
@@ -790,6 +972,13 @@ ActiveTech {
   prerequisite tech is not already active for the same owner. Prerequisites form a DAG.
 - **Tech revocation is not supported.** Counter a tech's effects by applying an inverting
   tech. The progression is one-way within a session.
+- **Adjacency bonuses are engine-maintained, not event-wired.** The engine evaluates
+  `FAdjacencyBonus` declarations automatically on every placement and demolition. Modifier
+  IDs encode both the bonus and the contributing building, enabling clean removal.
+- **Skill XP is granted on step completion only.** Cancelled or interrupted steps grant
+  no XP. Multiple `FSkillGrant` entries on one step are each applied independently.
+- **OutputScaling applies to output quantities only.** Input requirements in
+  `TRANSFORM_RESOURCE` steps are not scaled by skill level.
 - **Technologies apply to types, not instances.** An `"indefinite"` tech modifier applies
   to all current instances and all future spawns of the target definition. A `"once"` tech
   effect applies only to instances alive at application time.
